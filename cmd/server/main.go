@@ -3,6 +3,7 @@ package main
 import (
     "log"
     "github.com/gofiber/fiber/v2"
+    "github.com/slash-init/goflow/internal/api"
 )
 
 func main() {
@@ -10,12 +11,7 @@ func main() {
    app := fiber.New()
 
    //register a route
-   app.Get("/health", func(c *fiber.Ctx) error {
-       return c.JSON(fiber.Map{
-           "status":  "ok",
-           "service": "goflow",
-       })
-   })
+   app.Get("/health", api.HealthHandler)
 
    // start server
    log.Fatal(app.Listen(":8080"))

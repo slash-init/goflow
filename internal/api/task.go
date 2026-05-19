@@ -34,7 +34,7 @@ func (h *TaskHandler) CreateTask(c *fiber.Ctx) error {
 }
 
 func (h *TaskHandler) GetAllTasks(c *fiber.Ctx) error {
-	tasks, err := h.svc.GetAllTaks()
+	tasks, err := h.svc.GetAllTasks()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "could not fetch tasks",

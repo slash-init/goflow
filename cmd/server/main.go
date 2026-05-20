@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/slash-init/goflow/internal/api"
@@ -31,7 +36,12 @@ func main() {
 	go worker.RegisterHandlers(workerSrv) // <-- this is a goroutine
 
 	//create a new Fiber app
-	app := fiber.New()
+	app := fiber.New(fiber.Config{
+		// Fiber will return 503 to new requests during shutdown
+		// giving in-flight requests time to complete
+		ReadTimeout: 10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	})
 
 	//register a route
 	app.Get("/health", api.HealthHandler)
@@ -41,6 +51,32 @@ func main() {
 	api.Get("/tasks", taskHandler.GetAllTasks)
 	api.Get("/tasks/:id", taskHandler.GetTaskByID)
 
-	// start server
-	log.Fatal(app.Listen(":" + cfg.AppPort))
+	// Start HTTP server in a goroutine so it doesn't block
+	go func() {
+		log.Printf("Server starting on :%s", cfg.AppPort)
+		if err := app.Listen(":" + cfg.AppPort); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
+	}()
+
+	// Block here until we recieve a shutdown signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit // execution pauses here until signal arrives
+
+	log.Println("Shutdown signal recieved - draining...")
+
+	// Give everything 30 seconds to finish
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Shutdown Fiber (stops accepting new requests, waits for in-flight)
+	if err := app.ShutdownWithContext(ctx); err != nil {
+		log.Printf("HTTP shutdown error: %v", err)
+	}
+
+	// Shutdown Asynq worker (waits for running tasks to finish)
+	workerSrv.Shutdown()
+
+	log.Println("Shutdown complete.")
 }

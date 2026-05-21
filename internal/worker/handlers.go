@@ -48,3 +48,8 @@ func HandleGenerateReport(ctx context.Context, t *asynq.Task) error {
 
 	return nil
 }
+
+func HandleAlwaysFail(ctx context.Context, t *asynq.Task) error {
+	log.Printf("[FAIL] This task always fails")
+	return fmt.Errorf("intentional failure for testing")
+}

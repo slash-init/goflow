@@ -59,3 +59,61 @@ func (h *TaskHandler) GetTaskByID(c *fiber.Ctx) error {
 
     return c.JSON(task)
 }
+
+func (h *TaskHandler) ListDeadTasks(c *fiber.Ctx) error {
+	queue := c.Query("queue", "default") // ?queue=critical
+
+	tasks, err := h.svc.ListDeadTasks(queue)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	// return empty array not null when no dead tasks
+	if tasks == nil {
+		return c.JSON(fiber.Map{
+			"queue": queue,
+			"count": 0,
+			"tasks": []interface{}{},
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"queue": queue,
+		"count": len(tasks),
+		"tasks": tasks,
+	})
+}
+
+func (h *TaskHandler) RetryDeadTask(c *fiber.Ctx) error {
+	taskID := c.Params("id")
+	queue := c.Query("queue", "default")
+
+	if err := h.svc.RetryDeadTask(queue, taskID); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"message": "task re-queued successfully",
+		"id":      taskID,
+	})
+}
+
+func (h *TaskHandler) DeleteDeadTask(c *fiber.Ctx) error {
+	taskID := c.Params("id")
+	queue := c.Query("queue", "default")
+
+	if err := h.svc.DeleteDeadTask(queue, taskID); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"message": "task deleted",
+		"id":      taskID,
+	})
+}

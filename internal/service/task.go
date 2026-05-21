@@ -9,6 +9,7 @@ import (
 	"github.com/hibiken/asynq"
     "github.com/slash-init/goflow/internal/repository"
     "github.com/slash-init/goflow/pkg/queue"
+    queuepkg "github.com/slash-init/goflow/pkg/queue"
 )
 
 type CreateTaskInput struct {
@@ -87,4 +88,25 @@ func (s *TaskService) GetTaskByID(id string) (*repository.Task, error) {
         return nil, fmt.Errorf("task not found: %w", err)
     }
     return task, nil
+}
+
+func (s *TaskService) ListDeadTasks(queue string) ([]*queuepkg.DeadTask, error) {
+	if queue == "" {
+		queue = "default"
+	}
+	return s.client.ListDeadTasks(queue)
+}
+
+func (s *TaskService) RetryDeadTask(queue, taskID string) error {
+	if queue == "" {
+		queue = "default"
+	}
+	return s.client.RetryDeadTask(queue, taskID)
+}
+
+func (s *TaskService) DeleteDeadTask(queue, taskID string) error {
+	if queue == "" {
+		queue = "default"
+	}
+	return s.client.DeleteDeadTask(queue, taskID)
 }

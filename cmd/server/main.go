@@ -46,10 +46,13 @@ func main() {
 	//register a route
 	app.Get("/health", api.HealthHandler)
 
-	api := app.Group("/api/v1")
-	api.Post("/tasks", taskHandler.CreateTask)
-	api.Get("/tasks", taskHandler.GetAllTasks)
-	api.Get("/tasks/:id", taskHandler.GetTaskByID)
+    v1 := app.Group("/api/v1")
+    v1.Post("/tasks", taskHandler.CreateTask)
+    v1.Get("/tasks", taskHandler.GetAllTasks)
+    v1.Get("/tasks/dead", taskHandler.ListDeadTasks)          // before /:id
+    v1.Post("/tasks/dead/:id/retry", taskHandler.RetryDeadTask)
+    v1.Delete("/tasks/dead/:id", taskHandler.DeleteDeadTask)
+    v1.Get("/tasks/:id", taskHandler.GetTaskByID)             // after /dead
 
 	// Start HTTP server in a goroutine so it doesn't block
 	go func() {

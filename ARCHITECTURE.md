@@ -2,56 +2,52 @@
 
 ## Overview
 
-GoFlow is a distributed task queue and workflow engine. It separates task submission (HTTP API) from task processing (workers) using Redis as the message broker and PostgreSQL as the source of truth.
-
-A request to enqueue a task goes through three layers before the worker picks it up:
-
-```
-Client → HTTP Handler → Service → Repository → PostgreSQL
-                                ↘
-                                  Asynq Client → Redis → Worker → Handler fn
-```
+GoFlow is a distributed task queue and workflow engine. It separates task submission (HTTP API) from task processing (workers) using Redis as the message broker and PostgreSQL as the source of truth. On top of the task queue sits a workflow engine that orchestrates multi-step processes with automatic compensation on failure.
 
 ---
 
 ## Component Map
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                       GoFlow Process                    │
-│                                                         │
-│  ┌─────────────┐         ┌──────────────────────┐      │
-│  │  Fiber HTTP │         │    Asynq Worker       │      │
-│  │   Server    │         │    (goroutine)        │      │
-│  │             │         │                       │      │
-│  │  /health    │         │  mux.HandleFunc(      │      │
-│  │  /api/v1/   │         │    "email:send"       │      │
-│  │    tasks    │         │    "report:generate"  │      │
-│  │  /api/v1/   │         │    "task:fail"        │      │
-│  │  tasks/dead │         │  )                    │      │
-│  └──────┬──────┘         └──────────┬────────────┘      │
-│         │                           │                    │
-│  ┌──────▼──────┐           ┌────────▼────────┐          │
-│  │   Handler   │           │  Handler fns    │          │
-│  │  (api/)     │           │  (worker/)      │          │
-│  └──────┬──────┘           └─────────────────┘          │
-│         │                                                │
-│  ┌──────▼──────┐                                        │
-│  │   Service   │                                        │
-│  │  (service/) │                                        │
-│  └──────┬──────┘                                        │
-│         │                                                │
-│  ┌──────▼──────┐   ┌────────────────────────┐          │
-│  │  Repository │   │      Queue Client       │          │
-│  │ (repository)│   │  asynq.Client (enqueue) │          │
-│  │             │   │  asynq.Inspector (DLQ)  │          │
-│  └──────┬──────┘   └──────────┬─────────────┘          │
-└─────────┼────────────────────┼──────────────────────────┘
-          │                    │
-    ┌─────▼──────┐   ┌─────────▼───┐
-    │ PostgreSQL │   │    Redis     │
-    │            │   │   (Asynq)   │
-    └────────────┘   └─────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                        GoFlow Process                        │
+│                                                              │
+│  ┌─────────────┐         ┌──────────────────────┐           │
+│  │  Fiber HTTP │         │    Asynq Worker       │           │
+│  │   Server    │         │    (goroutine)        │           │
+│  │             │         │                       │           │
+│  │  /health    │         │  email:send           │           │
+│  │  /api/v1/   │         │  report:generate      │           │
+│  │    tasks    │         │  task:fail            │           │
+│  │  /api/v1/   │         └──────────────────────-┘           │
+│  │  workflows  │                                             │
+│  └──────┬──────┘         ┌──────────────────────┐           │
+│         │                │   Workflow Engine     │           │
+│         │                │   (goroutine)        │           │
+│         │                │                      │           │
+│         │                │  execute()           │           │
+│         │                │  failWorkflow()      │           │
+│         │                │  StepHandlers        │           │
+│         │                └──────────┬───────────┘           │
+│         │                           │                        │
+│  ┌──────▼───────────────────────────▼──────┐                │
+│  │              Service Layer              │                │
+│  │   TaskService        WorkflowService    │                │
+│  └──────┬───────────────────────┬──────────┘                │
+│         │                       │                            │
+│  ┌──────▼──────┐   ┌────────────▼────────┐                 │
+│  │  Task Repo  │   │  Workflow Repo       │                 │
+│  └──────┬──────┘   └────────────┬─────────┘                 │
+│         │          ┌────────────▼─────────┐                 │
+│         │          │  Queue Client        │                 │
+│         │          │  asynq.Client        │                 │
+│         │          │  asynq.Inspector     │                 │
+│         │          └────────────┬─────────┘                 │
+└─────────┼───────────────────────┼───────────────────────────┘
+          │                       │
+    ┌─────▼──────┐        ┌───────▼─────┐
+    │ PostgreSQL │        │    Redis    │
+    └────────────┘        └─────────────┘
 ```
 
 ---
@@ -60,96 +56,121 @@ Client → HTTP Handler → Service → Repository → PostgreSQL
 
 ### HTTP Layer — `internal/api/`
 
-Handles incoming requests. Responsible for parsing the request body, calling the service, and writing the HTTP response. Has no business logic and no direct database access.
+Handles incoming requests. Parses body, calls service, writes response. No business logic, no DB access.
 
-Files:
 - `health.go` — `GET /health`
-- `task.go` — all task and dead-letter endpoints
+- `task.go` — task CRUD + dead-letter endpoints
+- `workflow.go` — `POST /api/v1/workflows`, `GET /api/v1/workflows`, `GET /api/v1/workflows/:id`
 
 ### Service Layer — `internal/service/`
 
-Contains all business logic. Validates inputs, sets defaults, coordinates between the repository and the queue client. Does not know about HTTP or SQL.
+Business logic. Validates inputs, sets defaults, coordinates repositories and queue client.
 
-Files:
-- `task.go` — `CreateTask`, `GetAllTasks`, `GetTaskByID`, `ListDeadTasks`, `RetryDeadTask`, `DeleteDeadTask`
-
-Key decisions made here:
-- Default `max_retries` to 3 if not provided
-- Default queue to `"default"` if not specified
-- Calculate `run_at` from `delay_seconds`
-- Save to PostgreSQL before enqueuing to Redis (write-then-enqueue order)
+- `task.go` — task creation, listing, dead-letter operations
+- `workflow.go` — builds step definitions, delegates to engine
 
 ### Repository Layer — `internal/repository/`
 
-Only talks to the database. No business logic. All SQL lives here.
+All SQL. No business logic.
 
-Files:
-- `task.go` — `Task` struct, `TaskRepository`, `Create`, `GetAll`, `GetByID`
+- `task.go` — `Task` model, CRUD
+- `workflow.go` — `Workflow` + `WorkflowStep` models, transactional create, status updates
+
+### Workflow Engine — `internal/workflow/`
+
+Orchestrates step execution. Runs in a goroutine per workflow — non-blocking.
+
+- `engine.go` — `StartWorkflow`, `execute`, `failWorkflow`
+- `handlers.go` — `StepDefinition` type, built-in step handler functions
 
 ### Worker — `internal/worker/`
 
-Runs in a goroutine alongside the HTTP server. Polls Redis via Asynq and dispatches tasks to registered handler functions. On graceful shutdown, finishes any in-flight task before exiting.
+Asynq-based task processor. Separate from the workflow engine — handles one-off async tasks.
 
-Files:
-- `server.go` — creates the Asynq server with priority queue config, registers handlers
-- `handlers.go` — one function per task type; receives the task, unmarshals payload, does the work
+- `server.go` — Asynq server config + handler registration
+- `handlers.go` — `HandleSendEmail`, `HandleGenerateReport`, `HandleAlwaysFail`
 
 ### Shared Packages — `pkg/`
 
-| Package | File | Purpose |
-|---|---|---|
-| `config` | `config.go` | Loads `.env` via Viper, exposes typed `Config` struct |
-| `database` | `postgres.go` | Opens and validates a `*sqlx.DB` connection |
-| `queue` | `client.go` | Wraps `asynq.Client` (enqueue) + `asynq.Inspector` (DLQ ops) |
+| Package | Purpose |
+|---|---|
+| `config` | Loads `.env` via Viper |
+| `database` | PostgreSQL connection via sqlx |
+| `queue` | Asynq client (enqueue) + Inspector (dead-letter ops) |
 
 ---
 
-## Data Flow: Enqueuing a Task
+## Data Flow: Task Queue
 
 ```
 POST /api/v1/tasks
   │
   ▼
-TaskHandler.CreateTask()           — parse body, call service
-  │
-  ▼
-TaskService.CreateTask()           — validate, set defaults
-  │
-  ├──▶ TaskRepository.Create()    — INSERT into PostgreSQL, get back ID + timestamps
-  │
-  └──▶ queue.Client.EnqueueTask() — push to Redis via Asynq
-              │
-              ▼
-          Asynq Worker (goroutine)
-              │
-              ▼
-          Handler fn (e.g. HandleSendEmail)
-              │
-              ▼
-          return nil → success
-          return err → triggers retry
+TaskHandler → TaskService → TaskRepository → INSERT into PostgreSQL
+                         ↘
+                           queue.Client.EnqueueTask() → Redis
+                                                          │
+                                                    Asynq Worker
+                                                          │
+                                               handler fn → return nil/err
+                                                          │
+                                              err: retry with backoff
+                                              retries exhausted: → archived set
 ```
 
 ---
 
-## Data Flow: Retry & Dead-Letter
+## Data Flow: Workflow Execution
 
 ```
-Handler returns error
+POST /api/v1/workflows
   │
   ▼
-Asynq: retries < max_retries?
-  ├── yes → exponential backoff → re-queue
-  └── no  → move to archived set in Redis (dead-letter queue)
-                    │
-                    ▼
-          GET  /api/v1/tasks/dead        — list dead tasks via Inspector
-          POST /api/v1/tasks/dead/:id/retry  — RunArchivedTask()
-          DELETE /api/v1/tasks/dead/:id      — DeleteArchivedTask()
+WorkflowHandler → WorkflowService → engine.StartWorkflow()
+                                          │
+                                   INSERT workflow + steps → PostgreSQL
+                                          │
+                                   go execute()  ← goroutine, non-blocking
+                                   │
+                                   API returns immediately with workflow record
+                                          │
+                              ┌───────────▼────────────┐
+                              │   for each step:        │
+                              │   UPDATE status=running │
+                              │   call StepHandler()    │
+                              │   UPDATE status=completed│
+                              └───────────┬─────────────┘
+                                          │
+                              all steps done → UPDATE workflow status=completed
 ```
 
-Dead tasks are stored in a Redis sorted set: `asynq:{queue}:archived`.
-Inspected and managed via `asynq.Inspector` — no direct Redis access needed.
+---
+
+## Data Flow: Compensation (Saga Pattern)
+
+When a step fails, already-completed steps are rolled back in reverse order:
+
+```
+Step 1: completed  ──────────────────────────────┐
+Step 2: completed  ────────────────────┐         │
+Step 3: FAILED                         │         │
+  │                                    │         │
+  ▼                                    ▼         ▼
+failWorkflow()              compensate step 2  compensate step 1
+  │                         payment:refund     inventory:release
+  │
+  UPDATE workflow status=compensating
+  │
+  iterate completed steps in reverse
+  │
+  for each step with CompensationTaskType:
+    call compensation handler
+    UPDATE step status=compensated
+  │
+  UPDATE workflow status=compensated
+```
+
+Compensation is best-effort — if a compensation handler fails, it logs and continues to the next step. The workflow ends in `compensated` regardless.
 
 ---
 
@@ -159,57 +180,78 @@ Inspected and managed via `asynq.Inspector` — no direct Redis access needed.
 SIGTERM or CTRL+C
   │
   ▼
-os/signal → quit channel unblocks
+signal.Notify → quit channel unblocks in main()
   │
-  ├──▶ app.ShutdownWithContext(30s) — Fiber stops accepting, drains in-flight HTTP
-  │
-  ├──▶ workerSrv.Shutdown()         — Asynq waits for running tasks to finish
-  │
-  └──▶ defer db.Close()             — PostgreSQL connection closed
-       defer queueClient.Close()    — Redis connection closed
+  ├──▶ app.ShutdownWithContext(30s)  — Fiber drains in-flight HTTP requests
+  ├──▶ workerSrv.Shutdown()          — Asynq waits for running tasks to finish
+  └──▶ defer db.Close()              — PostgreSQL connection closed
+       defer queueClient.Close()     — Redis connection closed
 ```
-
-The 30-second timeout is a hard ceiling — if tasks don't finish in time, the process exits anyway.
 
 ---
 
 ## Database Schema
 
-### `tasks` table
+### `tasks`
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | UUID | Primary key, auto-generated |
-| `type` | VARCHAR(255) | Task type identifier e.g. `email:send` |
-| `payload` | JSONB | Arbitrary task data |
-| `status` | ENUM | `pending`, `processing`, `completed`, `failed`, `dead` |
-| `priority` | INTEGER | Higher = more important |
+| `id` | UUID | PK, auto-generated |
+| `type` | VARCHAR(255) | Handler identifier |
+| `payload` | JSONB | Task input data |
+| `status` | ENUM | `pending` `processing` `completed` `failed` `dead` |
+| `priority` | INTEGER | Higher = more urgent |
 | `max_retries` | INTEGER | Max retry attempts |
 | `retries` | INTEGER | Current retry count |
-| `last_error` | TEXT | Nullable — last failure message |
-| `run_at` | TIMESTAMPTZ | When to process (supports delayed tasks) |
+| `last_error` | TEXT | Nullable |
+| `run_at` | TIMESTAMPTZ | Supports delayed tasks |
 | `created_at` | TIMESTAMPTZ | Auto-set |
 | `updated_at` | TIMESTAMPTZ | Auto-set |
 
-Indexes: `idx_tasks_status`, `idx_tasks_run_at`
+### `workflows`
 
-Note: Task status in PostgreSQL is not automatically synced by Asynq. The DB record reflects the state at enqueue time. Live status lives in Redis. Status sync is a planned feature.
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID | PK, auto-generated |
+| `name` | VARCHAR(255) | Workflow identifier e.g. `order:process` |
+| `status` | ENUM | `pending` `running` `completed` `failed` `compensating` `compensated` |
+| `input` | JSONB | Workflow-level input |
+| `current_step` | INTEGER | Index of the step currently executing |
+| `last_error` | TEXT | Nullable — set on failure |
+| `created_at` | TIMESTAMPTZ | Auto-set |
+| `updated_at` | TIMESTAMPTZ | Auto-set |
+
+### `workflow_steps`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID | PK, auto-generated |
+| `workflow_id` | UUID | FK → workflows.id |
+| `step_index` | INTEGER | Order of execution (0-based) |
+| `name` | VARCHAR(255) | Human-readable step name |
+| `task_type` | VARCHAR(255) | Maps to a registered StepHandler |
+| `status` | ENUM | `pending` `running` `completed` `failed` `compensating` `compensated` `skipped` |
+| `input` | JSONB | Step input data |
+| `output` | JSONB | Nullable — populated on success |
+| `last_error` | TEXT | Nullable — populated on failure |
+| `compensation_task_type` | VARCHAR(255) | Nullable — handler to run on rollback |
+| `started_at` | TIMESTAMPTZ | Set when status → running |
+| `completed_at` | TIMESTAMPTZ | Set when status → completed/failed/compensated |
+| `created_at` | TIMESTAMPTZ | Auto-set |
+
+Indexes: `idx_workflow_steps_workflow_id`, `idx_workflows_status`
 
 ---
 
 ## Queue Configuration
 
-Asynq uses named priority queues with weighted processing:
-
-| Queue | Weight | Relative throughput |
+| Queue | Weight | Use for |
 |---|---|---|
-| `critical` | 6 | ~60% of worker capacity |
-| `default` | 3 | ~30% of worker capacity |
-| `low` | 1 | ~10% of worker capacity |
+| `critical` | 6 | ~60% of capacity |
+| `default` | 3 | ~30% of capacity |
+| `low` | 1 | ~10% of capacity |
 
-Worker concurrency: 10 simultaneous tasks.
-Retry backoff: exponential, managed by Asynq.
-Dead-letter storage: Redis sorted set per queue (`asynq:{queue}:archived`).
+Worker concurrency: 10. Retry backoff: exponential (managed by Asynq).
 
 ---
 
@@ -217,33 +259,34 @@ Dead-letter storage: Redis sorted set per queue (`asynq:{queue}:archived`).
 
 | Service | Image | Port | Purpose |
 |---|---|---|---|
-| PostgreSQL | `postgres:16-alpine` | 5432 | Task persistence, workflow state |
+| PostgreSQL | `postgres:16-alpine` | 5432 | Task + workflow persistence |
 | Redis | `redis:7-alpine` | 6379 | Asynq queue broker + dead-letter store |
-
-Both run via Docker Compose. PostgreSQL data persisted in named volume (`postgres_data`). Redis data is ephemeral by default.
 
 ---
 
 ## Key Design Decisions
 
-**Write-then-enqueue**: Tasks are saved to PostgreSQL before being pushed to Redis. If Redis is temporarily unavailable, the task record still exists and can be re-enqueued. If PostgreSQL fails, nothing is enqueued.
+**Workflow runs in a goroutine, not a separate task**: Each workflow execution is a goroutine spawned by `StartWorkflow`. This keeps things simple — no separate scheduler, no polling. The tradeoff is that if the process crashes mid-workflow, the workflow won't resume automatically. Crash recovery is a planned feature.
 
-**Worker runs in the same process as the HTTP server**: Kept simple using a goroutine. In production this would be a separate binary (`cmd/worker/main.go`) to scale independently.
+**Saga compensation is reverse-order**: Completed steps are compensated newest-first. This mirrors how database transactions roll back — last operation undone first.
 
-**Graceful shutdown with bounded timeout**: The process gives tasks 30 seconds to finish. This is long enough for most tasks but prevents indefinite hangs on shutdown.
+**Write-then-enqueue for tasks**: Tasks are saved to PostgreSQL before Redis. If Redis is down, the record exists and can be re-enqueued manually.
 
-**Dead-letter queue via Inspector, not direct Redis**: Asynq's `Inspector` API abstracts Redis internals. This means the DLQ implementation won't break if Asynq changes its internal storage format.
+**Step output stored as JSONB**: Each step's output is persisted so later steps could reference earlier results. The current implementation passes the original workflow input to every step — chaining step outputs as inputs to subsequent steps is a planned enhancement.
 
-**Statically typed payloads in workers**: Each handler defines its own payload struct and unmarshals from raw bytes. Handlers are self-contained and easy to unit test.
+**No ORM**: Raw SQL via `sqlx`. Full control, no magic, easy to audit.
 
-**No ORM**: Uses `sqlx` with raw SQL. Full control over queries, no magic, easy to reason about performance.
+**Explicit enum casting in PostgreSQL**: Status updates use `$1::step_status` and `$1::workflow_status` to avoid `lib/pq` silently failing on enum comparisons.
 
 ---
 
 ## What's Not Built Yet
 
-- Task status sync back to PostgreSQL after worker processes
-- Workflow engine (multi-step, sequential/parallel, compensation)
+- Crash recovery for in-flight workflows (process restart resumes from current step)
+- Step output chaining (pass step N output as input to step N+1)
+- Parallel step execution
+- Conditional branching in workflows
+- Task status sync to PostgreSQL after Asynq processes
 - Observability (Prometheus, OpenTelemetry, Grafana)
 - Admin dashboard
 - Auth (JWT)

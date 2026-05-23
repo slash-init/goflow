@@ -1,6 +1,6 @@
 # GoFlow
 
-A distributed task queue and workflow engine built in Go. Tasks are enqueued via a REST API, persisted in PostgreSQL, queued through Redis, and processed by concurrent workers with automatic retries, priority queues, and dead-letter queue management.
+A distributed task queue and workflow engine built in Go. Tasks are enqueued via a REST API, persisted in PostgreSQL, queued through Redis, and processed by concurrent workers with automatic retries, priority queues, dead-letter queue management, and multi-step workflow orchestration with compensation.
 
 ---
 
@@ -15,7 +15,7 @@ A distributed task queue and workflow engine built in Go. Tasks are enqueued via
 
 ```bash
 # Clone the repo
-git clone https://github.com/slash-init/goflow.git
+git clone https://github.com/yourusername/goflow.git
 cd goflow
 
 # Start infrastructure
@@ -23,6 +23,7 @@ docker compose up -d
 
 # Run database migrations
 docker exec -i goflow_postgres psql -U goflow -d goflow_db < migrations/001_create_tasks.sql
+docker exec -i goflow_postgres psql -U goflow -d goflow_db < migrations/002_create_workflows.sql
 
 # Start the server (HTTP + worker runs together)
 go run cmd/server/main.go
@@ -65,7 +66,9 @@ Response:
 
 ---
 
-### Create a task
+### Tasks
+
+#### Create a task
 
 ```
 POST /api/v1/tasks
@@ -75,10 +78,7 @@ Body:
 ```json
 {
   "type": "email:send",
-  "payload": {
-    "to": "user@example.com",
-    "subject": "Welcome"
-  },
+  "payload": { "to": "user@example.com", "subject": "Welcome" },
   "priority": 1,
   "max_retries": 3,
   "queue": "default",
@@ -91,69 +91,41 @@ Body:
 | `type` | string | yes | Task handler identifier |
 | `payload` | object | yes | Arbitrary data passed to the handler |
 | `priority` | int | no | Higher = more important (default 0) |
-| `max_retries` | int | no | How many times to retry on failure (default 3) |
+| `max_retries` | int | no | Retry attempts on failure (default 3) |
 | `queue` | string | no | `critical`, `default`, or `low` (default: `default`) |
 | `delay_seconds` | int | no | Delay before processing (default 0) |
 
-Response `201 Created`:
-```json
-{
-  "id": "uuid",
-  "type": "email:send",
-  "status": "pending",
-  "priority": 1,
-  "max_retries": 3,
-  "retries": 0,
-  "run_at": "...",
-  "created_at": "..."
-}
-```
+Response `201 Created`: task object.
 
 ---
 
-### List all tasks
+#### List all tasks
 
 ```
 GET /api/v1/tasks
 ```
 
-Response:
-```json
-{
-  "count": 2,
-  "tasks": [ ... ]
-}
-```
-
 ---
 
-### Get a task by ID
+#### Get a task by ID
 
 ```
 GET /api/v1/tasks/:id
 ```
 
-Response: task object or `404` if not found.
-
 ---
 
-### List dead tasks
-
-Tasks that have exhausted all retries land in the dead-letter queue.
+#### List dead tasks
 
 ```
 GET /api/v1/tasks/dead?queue=default
 ```
 
-| Query param | Default | Description |
-|---|---|---|
-| `queue` | `default` | Which queue to inspect (`critical`, `default`, `low`) |
-
 Response:
 ```json
 {
   "queue": "default",
-  "count": 2,
+  "count": 1,
   "tasks": [
     {
       "id": "uuid",
@@ -169,33 +141,96 @@ Response:
 
 ---
 
-### Retry a dead task
-
-Re-queues the task for immediate processing.
+#### Retry a dead task
 
 ```
 POST /api/v1/tasks/dead/:id/retry?queue=default
 ```
 
-Response:
-```json
-{ "id": "uuid", "message": "task re-queued successfully" }
-```
-
 ---
 
-### Delete a dead task
-
-Permanently removes the task from the dead-letter queue.
+#### Delete a dead task
 
 ```
 DELETE /api/v1/tasks/dead/:id?queue=default
 ```
 
+---
+
+### Workflows
+
+#### Start a workflow
+
+```
+POST /api/v1/workflows
+```
+
+Body:
+```json
+{
+  "name": "order:process",
+  "input": {
+    "order_id": "order_001",
+    "amount": 99.99
+  }
+}
+```
+
+The workflow starts immediately and runs in the background. The API returns as soon as the workflow is created — you don't wait for it to finish.
+
+Response `201 Created`:
+```json
+{
+  "ID": "uuid",
+  "Name": "order:process",
+  "Status": "running",
+  "CurrentStep": 0,
+  "CreatedAt": "..."
+}
+```
+
+---
+
+#### List all workflows
+
+```
+GET /api/v1/workflows
+```
+
+---
+
+#### Get a workflow with step details
+
+```
+GET /api/v1/workflows/:id
+```
+
 Response:
 ```json
-{ "id": "uuid", "message": "task deleted" }
+{
+  "workflow": {
+    "ID": "uuid",
+    "Name": "order:process",
+    "Status": "completed",
+    "CurrentStep": 3,
+    "LastError": null
+  },
+  "steps": [
+    {
+      "StepIndex": 0,
+      "Name": "Reserve Inventory",
+      "TaskType": "inventory:reserve",
+      "Status": "completed",
+      "Output": "...",
+      "StartedAt": "...",
+      "CompletedAt": "..."
+    }
+  ]
+}
 ```
+
+Possible workflow statuses: `pending`, `running`, `completed`, `failed`, `compensating`, `compensated`.
+Possible step statuses: `pending`, `running`, `completed`, `failed`, `compensating`, `compensated`, `skipped`.
 
 ---
 
@@ -207,7 +242,35 @@ Response:
 | `report:generate` | Generates a report for a user |
 | `task:fail` | Always fails — used for testing dead-letter flow |
 
-To add a new task type: create a handler function in `internal/worker/handlers.go` and register it in `internal/worker/server.go`.
+---
+
+## Built-in Workflow Step Handlers
+
+| Task Type | Description | Has Compensation |
+|---|---|---|
+| `inventory:reserve` | Reserves inventory for an order | yes → `inventory:release` |
+| `inventory:release` | Releases reserved inventory (compensation) | no |
+| `payment:charge` | Charges payment for an order | yes → `payment:refund` |
+| `payment:refund` | Refunds a charge (compensation) | no |
+| `notification:send` | Sends order confirmation | no |
+
+To add a new step handler: implement a `StepHandler` function and call `engine.RegisterHandler(taskType, fn)`.
+
+---
+
+## Workflow: Order Processing
+
+The built-in `order:process` workflow runs three steps in sequence:
+
+```
+Step 1: inventory:reserve   → compensation: inventory:release
+Step 2: payment:charge      → compensation: payment:refund
+Step 3: notification:send   → no compensation
+```
+
+If any step fails, compensation runs in reverse order for all previously completed steps. For example, if `payment:charge` fails, `inventory:release` runs to undo step 1.
+
+To trigger a failure for testing, set `amount > 1000` — the payment handler will decline it.
 
 ---
 
@@ -226,9 +289,8 @@ Worker concurrency: 10 simultaneous tasks.
 ## Retry & Dead-Letter Behaviour
 
 - Failed tasks are automatically retried with exponential backoff
-- After `max_retries` exhausted, tasks move to the dead-letter queue (archived in Redis)
+- After `max_retries` exhausted, tasks move to the dead-letter queue
 - Dead tasks are inspectable, retryable, and deletable via API
-- Retry backoff is managed by Asynq — no manual scheduling needed
 
 ---
 
@@ -241,8 +303,6 @@ The server handles `CTRL+C` and `SIGTERM` cleanly:
 3. Waits for any currently-running worker tasks to complete
 4. Closes DB and Redis connections
 
-No tasks are dropped or corrupted on shutdown.
-
 ---
 
 ## Project Structure
@@ -253,22 +313,29 @@ goflow/
 ├── internal/
 │   ├── api/                    # HTTP handlers
 │   │   ├── health.go
-│   │   └── task.go
+│   │   ├── task.go
+│   │   └── workflow.go
 │   ├── service/
-│   │   └── task.go             # Business logic
+│   │   ├── task.go             # Task business logic
+│   │   └── workflow.go         # Workflow business logic
 │   ├── repository/
-│   │   └── task.go             # DB queries + Task model
-│   └── worker/
-│       ├── server.go           # Asynq worker server + handler registration
-│       └── handlers.go         # Task processing functions
+│   │   ├── task.go             # Task DB queries + model
+│   │   └── workflow.go         # Workflow + step DB queries + models
+│   ├── worker/
+│   │   ├── server.go           # Asynq worker server
+│   │   └── handlers.go         # Task processing functions
+│   └── workflow/
+│       ├── engine.go           # Workflow orchestration engine
+│       └── handlers.go         # Step handler functions + StepDefinition
 ├── pkg/
 │   ├── config/config.go        # Env config via Viper
 │   ├── database/postgres.go    # PostgreSQL connection
-│   └── queue/client.go         # Asynq client + Inspector (dead-letter ops)
+│   └── queue/client.go         # Asynq client + Inspector
 ├── migrations/
-│   └── 001_create_tasks.sql    # Tasks table
+│   ├── 001_create_tasks.sql
+│   └── 002_create_workflows.sql
 ├── docker-compose.yml
-├── .env                        # Not committed
+├── .env
 └── go.mod
 ```
 
@@ -287,8 +354,8 @@ docker compose down -v          # Stop + delete volumes (wipes DB)
 
 ## What's Coming
 
-- Workflow engine (sequential + parallel + compensating steps)
-- Observability (Prometheus metrics, OpenTelemetry tracing, Grafana)
-- Admin dashboard (monitor queues, tasks, workflows)
+- Observability (Prometheus metrics, OpenTelemetry tracing, Grafana dashboard)
+- Admin UI (monitor queues, tasks, workflows in browser)
 - Auth (JWT)
 - Docker image for the Go app + full containerised deployment
+- Parallel workflow steps

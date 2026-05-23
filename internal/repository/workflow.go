@@ -2,6 +2,7 @@ package repository
 
 import (
 	"time"
+	"fmt"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -68,39 +69,34 @@ func (r *WorkflowRepository) Create(wf *Workflow, steps []WorkflowStep) error {
 	}
 	defer tx.Rollback()
 
-	query := `
+	// Use QueryRowx instead of NamedQuery to avoid the pq RETURNING bug
+	err = tx.QueryRowx(`
 		INSERT INTO workflows (name, status, input)
-		VALUES (:name, :status, :input)
+		VALUES ($1, $2, $3)
 		RETURNING id, current_step, created_at, updated_at
-	`
-	rows, err := tx.NamedQuery(query, wf)
+	`, wf.Name, wf.Status, wf.Input).StructScan(wf)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.StructScan(wf); err != nil {
-			return err
-		}
+		return fmt.Errorf("could not insert workflow: %w", err)
 	}
 
 	for i := range steps {
 		steps[i].WorkflowID = wf.ID
-		stepQuery := `
+		err = tx.QueryRowx(`
 			INSERT INTO workflow_steps
 				(workflow_id, step_index, name, task_type, input, compensation_task_type)
-			VALUES
-				(:workflow_id, :step_index, :name, :task_type, :input, :compensation_task_type)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			RETURNING id, status, created_at
-		`
-		stepRows, err := tx.NamedQuery(stepQuery, &steps[i])
+		`,
+			steps[i].WorkflowID,
+			steps[i].StepIndex,
+			steps[i].Name,
+			steps[i].TaskType,
+			steps[i].Input,
+			steps[i].CompensationTaskType,
+		).StructScan(&steps[i])
 		if err != nil {
-			return err
+			return fmt.Errorf("could not insert step %d: %w", i, err)
 		}
-		if stepRows.Next() {
-			stepRows.StructScan(&steps[i])
-		}
-		stepRows.Close()
 	}
 
 	return tx.Commit()
@@ -141,9 +137,15 @@ func (r *WorkflowRepository) UpdateWorkflowStatus(id string, status WorkflowStat
 func (r *WorkflowRepository) UpdateStepStatus(stepID string, status StepStatus, output []byte, lastError *string) error {
 	_, err := r.db.Exec(`
 		UPDATE workflow_steps
-		SET status = $1, output = $2, last_error = $3,
-		    started_at = CASE WHEN $1 = 'running' THEN NOW() ELSE started_at END,
-		    completed_at = CASE WHEN $1 IN ('completed','failed','compensated') THEN NOW() ELSE completed_at END
+		SET status     = $1::step_status,
+		    output     = $2,
+		    last_error = $3,
+		    started_at   = CASE WHEN $1 = 'running'
+		                        THEN NOW()
+		                        ELSE started_at END,
+		    completed_at = CASE WHEN $1 IN ('completed','failed','compensated','compensating')
+		                        THEN NOW()
+		                        ELSE completed_at END
 		WHERE id = $4
 	`, status, output, lastError, stepID)
 	return err

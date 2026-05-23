@@ -24,5 +24,3 @@ func NewPostgresDB(cfg *config.Config) *sqlx.DB {
 	log.Println("PostgreSQL connected successfully")
 	return db
 }
-
-

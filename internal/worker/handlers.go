@@ -1,18 +1,18 @@
 package worker
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "log"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
 
-    "github.com/hibiken/asynq"
+	"github.com/hibiken/asynq"
 )
 
 // --- Email Task ---
 
 type SendEmailPayload struct {
-	To string `json:"to"`
+	To      string `json:"to"`
 	Subject string `json:"subject"`
 }
 
@@ -32,7 +32,7 @@ func HandleSendEmail(ctx context.Context, t *asynq.Task) error {
 
 type GenerateReportPayload struct {
 	ReportType string `json:"report_type"`
-	UserID string `json:"user_id"`
+	UserID     string `json:"user_id"`
 }
 
 func HandleGenerateReport(ctx context.Context, t *asynq.Task) error {

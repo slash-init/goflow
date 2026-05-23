@@ -48,16 +48,16 @@ func (h *TaskHandler) GetAllTasks(c *fiber.Ctx) error {
 }
 
 func (h *TaskHandler) GetTaskByID(c *fiber.Ctx) error {
-    id := c.Params("id")     // like req.params.id in Express
+	id := c.Params("id") // like req.params.id in Express
 
-    task, err := h.svc.GetTaskByID(id)
-    if err != nil {
-        return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-            "error": err.Error(),
-        })
-    }
+	task, err := h.svc.GetTaskByID(id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
 
-    return c.JSON(task)
+	return c.JSON(task)
 }
 
 func (h *TaskHandler) ListDeadTasks(c *fiber.Ctx) error {

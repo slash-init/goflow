@@ -13,6 +13,7 @@ import (
 	"github.com/slash-init/goflow/internal/repository"
 	"github.com/slash-init/goflow/internal/service"
 	"github.com/slash-init/goflow/internal/worker"
+	"github.com/slash-init/goflow/internal/workflow"
 	"github.com/slash-init/goflow/pkg/config"
 	"github.com/slash-init/goflow/pkg/database"
 	"github.com/slash-init/goflow/pkg/queue"
@@ -23,8 +24,8 @@ func main() {
 	db := database.NewPostgresDB(cfg)
 	defer db.Close() //closes DB connection when main() exits
 
-    queueClient := queue.NewClient(cfg.RedisAddr)
-    defer queueClient.Close()
+	queueClient := queue.NewClient(cfg.RedisAddr)
+	defer queueClient.Close()
 
 	// Wire up layers
 	taskRepo := repository.NewTaskRepository(db)
@@ -39,20 +40,31 @@ func main() {
 	app := fiber.New(fiber.Config{
 		// Fiber will return 503 to new requests during shutdown
 		// giving in-flight requests time to complete
-		ReadTimeout: 10 * time.Second,
+		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	})
 
 	//register a route
 	app.Get("/health", api.HealthHandler)
 
-    v1 := app.Group("/api/v1")
-    v1.Post("/tasks", taskHandler.CreateTask)
-    v1.Get("/tasks", taskHandler.GetAllTasks)
-    v1.Get("/tasks/dead", taskHandler.ListDeadTasks)          // before /:id
-    v1.Post("/tasks/dead/:id/retry", taskHandler.RetryDeadTask)
-    v1.Delete("/tasks/dead/:id", taskHandler.DeleteDeadTask)
-    v1.Get("/tasks/:id", taskHandler.GetTaskByID)             // after /dead
+	v1 := app.Group("/api/v1")
+	v1.Post("/tasks", taskHandler.CreateTask)
+	v1.Get("/tasks", taskHandler.GetAllTasks)
+	v1.Get("/tasks/dead", taskHandler.ListDeadTasks) // before /:id
+	v1.Post("/tasks/dead/:id/retry", taskHandler.RetryDeadTask)
+	v1.Delete("/tasks/dead/:id", taskHandler.DeleteDeadTask)
+	v1.Get("/tasks/:id", taskHandler.GetTaskByID) // after /dead
+
+	// Workflow engine
+	workflowRepo := repository.NewWorkflowRepository(db)
+	workflowEngine := workflow.NewEngine(workflowRepo, queueClient)
+	workflowSvc := service.NewWorkflowService(workflowEngine, workflowRepo)
+	workflowHandler := api.NewWorkflowHandler(workflowSvc)
+
+	// Workflow routes
+	v1.Post("/workflows", workflowHandler.StartWorkflow)
+	v1.Get("/workflows", workflowHandler.GetAllWorkflows)
+	v1.Get("/workflows/:id", workflowHandler.GetWorkflow)
 
 	// Start HTTP server in a goroutine so it doesn't block
 	go func() {

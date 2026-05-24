@@ -8,6 +8,7 @@ import (
 
 type Config struct {
 	AppPort string
+	AppEnv  string
 
 	DBHost     string
 	DBPort     string
@@ -28,6 +29,7 @@ func Load() *Config {
 
 	return &Config{
 		AppPort:    viper.GetString("APP_PORT"),
+		AppEnv:     viper.GetString("APP_ENV"),
 		DBHost:     viper.GetString("DB_HOST"),
 		DBPort:     viper.GetString("DB_PORT"),
 		DBUser:     viper.GetString("DB_USER"),

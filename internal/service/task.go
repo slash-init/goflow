@@ -8,8 +8,10 @@ import (
 
 	"github.com/hibiken/asynq"
 	"github.com/slash-init/goflow/internal/repository"
-	"github.com/slash-init/goflow/pkg/queue"
+	"github.com/slash-init/goflow/pkg/logger"
+	"github.com/slash-init/goflow/pkg/metrics"
 	queuepkg "github.com/slash-init/goflow/pkg/queue"
+	"go.uber.org/zap"
 )
 
 type CreateTaskInput struct {
@@ -23,10 +25,10 @@ type CreateTaskInput struct {
 
 type TaskService struct {
 	repo   *repository.TaskRepository
-	client *queue.Client
+	client *queuepkg.Client
 }
 
-func NewTaskService(repo *repository.TaskRepository, client *queue.Client) *TaskService {
+func NewTaskService(repo *repository.TaskRepository, client *queuepkg.Client) *TaskService {
 	return &TaskService{repo: repo, client: client}
 }
 
@@ -74,6 +76,14 @@ func (s *TaskService) CreateTask(input CreateTaskInput) (*repository.Task, error
 	if err := s.client.EnqueueTask(context.Background(), input.Type, input.Payload, opts...); err != nil {
 		return nil, fmt.Errorf("could not enqueue task: %w", err)
 	}
+
+	// Metrics + structured log
+	metrics.TasksEnqueued.WithLabelValues(input.Type, input.Queue).Inc()
+	logger.Info("task enqueued",
+		zap.String("type", input.Type),
+		zap.String("queue", input.Queue),
+		zap.String("id", task.ID),
+	)
 
 	return task, nil
 }

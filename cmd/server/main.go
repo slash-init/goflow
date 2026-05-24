@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/valyala/fasthttp/fasthttpadaptor"
+	"go.uber.org/zap"
+
 	"github.com/slash-init/goflow/internal/api"
 	"github.com/slash-init/goflow/internal/repository"
 	"github.com/slash-init/goflow/internal/service"
@@ -16,11 +19,19 @@ import (
 	"github.com/slash-init/goflow/internal/workflow"
 	"github.com/slash-init/goflow/pkg/config"
 	"github.com/slash-init/goflow/pkg/database"
+	"github.com/slash-init/goflow/pkg/logger"
+	"github.com/slash-init/goflow/pkg/metrics"
 	"github.com/slash-init/goflow/pkg/queue"
 )
 
 func main() {
 	cfg := config.Load()
+
+	// Init logger and metrics
+	logger.Init(cfg.AppEnv)
+	defer logger.Log.Sync()
+	metrics.Init()
+
 	db := database.NewPostgresDB(cfg)
 	defer db.Close() //closes DB connection when main() exits
 
@@ -31,6 +42,12 @@ func main() {
 	taskRepo := repository.NewTaskRepository(db)
 	taskSvc := service.NewTaskService(taskRepo, queueClient)
 	taskHandler := api.NewTaskHandler(taskSvc)
+
+	// Workflow engine
+	workflowRepo := repository.NewWorkflowRepository(db)
+	workflowEngine := workflow.NewEngine(workflowRepo, queueClient)
+	workflowSvc := service.NewWorkflowService(workflowEngine, workflowRepo)
+	workflowHandler := api.NewWorkflowHandler(workflowSvc)
 
 	// Start worker in background goroutine
 	workerSrv := worker.NewWorkerServer(cfg.RedisAddr)
@@ -44,7 +61,16 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 	})
 
-	//register a route
+	// Middleware
+	app.Use(api.LoggerMiddleware())
+
+	// Prometheus metrics endpoint
+	app.Get("/metrics", func(c *fiber.Ctx) error {
+		fasthttpadaptor.NewFastHTTPHandler(promhttp.Handler())(c.Context())
+		return nil
+	})
+
+	// Routes
 	app.Get("/health", api.HealthHandler)
 
 	v1 := app.Group("/api/v1")
@@ -55,12 +81,6 @@ func main() {
 	v1.Delete("/tasks/dead/:id", taskHandler.DeleteDeadTask)
 	v1.Get("/tasks/:id", taskHandler.GetTaskByID) // after /dead
 
-	// Workflow engine
-	workflowRepo := repository.NewWorkflowRepository(db)
-	workflowEngine := workflow.NewEngine(workflowRepo, queueClient)
-	workflowSvc := service.NewWorkflowService(workflowEngine, workflowRepo)
-	workflowHandler := api.NewWorkflowHandler(workflowSvc)
-
 	// Workflow routes
 	v1.Post("/workflows", workflowHandler.StartWorkflow)
 	v1.Get("/workflows", workflowHandler.GetAllWorkflows)
@@ -68,9 +88,9 @@ func main() {
 
 	// Start HTTP server in a goroutine so it doesn't block
 	go func() {
-		log.Printf("Server starting on :%s", cfg.AppPort)
+		logger.Info("server starting", zap.String("port", cfg.AppPort))
 		if err := app.Listen(":" + cfg.AppPort); err != nil {
-			log.Fatalf("Server error: %v", err)
+			logger.Fatal("server error", zap.Error(err))
 		}
 	}()
 
@@ -79,7 +99,7 @@ func main() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit // execution pauses here until signal arrives
 
-	log.Println("Shutdown signal recieved - draining...")
+	logger.Info("Shutdown signal recieved - draining...")
 
 	// Give everything 30 seconds to finish
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -87,11 +107,11 @@ func main() {
 
 	// Shutdown Fiber (stops accepting new requests, waits for in-flight)
 	if err := app.ShutdownWithContext(ctx); err != nil {
-		log.Printf("HTTP shutdown error: %v", err)
+		logger.Error("HTTP shutdown error", zap.Error(err))
 	}
 
 	// Shutdown Asynq worker (waits for running tasks to finish)
 	workerSrv.Shutdown()
 
-	log.Println("Shutdown complete.")
+	logger.Info("Shutdown complete.")
 }

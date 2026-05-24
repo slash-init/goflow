@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"time"
 
 	"github.com/slash-init/goflow/internal/repository"
+	"github.com/slash-init/goflow/pkg/logger"
+	"github.com/slash-init/goflow/pkg/metrics"
 	"github.com/slash-init/goflow/pkg/queue"
+	"go.uber.org/zap"
 )
 
 // StepHandler is a function that does the actual work for a step.
@@ -73,13 +76,22 @@ func (e *Engine) StartWorkflow(ctx context.Context, name string, stepDefs []Step
 
 // execute runs all steps in order.
 func (e *Engine) execute(ctx context.Context, workflowID string) {
+	start := time.Now()
+
 	wf, steps, err := e.repo.GetByID(workflowID)
 	if err != nil {
-		log.Printf("[WORKFLOW] Could not load workflow %s: %v", workflowID, err)
+		logger.Error("could not load workflow",
+			zap.String("workflow_id", workflowID),
+			zap.Error(err),
+		)
 		return
 	}
 
-	log.Printf("[WORKFLOW] Starting %s (id=%s)", wf.Name, wf.ID)
+	metrics.WorkflowsStarted.WithLabelValues(wf.Name).Inc()
+	logger.Info("workflow started",
+		zap.String("workflow_id", wf.ID),
+		zap.String("name", wf.Name),
+	)
 
 	for i := range steps {
 		step := &steps[i]
@@ -88,7 +100,11 @@ func (e *Engine) execute(ctx context.Context, workflowID string) {
 		e.repo.UpdateStepStatus(step.ID, repository.StepStatusRunning, nil, nil)
 		e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusRunning, i, nil)
 
-		log.Printf("[WORKFLOW] Step %d/%d: %s", i+1, len(steps), step.Name)
+		logger.Info("step started",
+			zap.String("workflow_id", wf.ID),
+			zap.String("step", step.Name),
+			zap.Int("index", i),
+		)
 
 		// Get the handler for this step's task type
 		handler, ok := e.handlers[step.TaskType]
@@ -106,7 +122,11 @@ func (e *Engine) execute(ctx context.Context, workflowID string) {
 		output, err := handler(ctx, stepInput)
 		if err != nil {
 			errMsg := err.Error()
-			log.Printf("[WORKFLOW] Step %d failed: %v", i+1, err)
+			logger.Error("step failed",
+				zap.String("workflow_id", wf.ID),
+				zap.String("step", step.Name),
+				zap.Error(err),
+			)
 			e.repo.UpdateStepStatus(step.ID, repository.StepStatusFailed, nil, &errMsg)
 			e.failWorkflow(wf, steps, i, errMsg)
 			return
@@ -115,18 +135,34 @@ func (e *Engine) execute(ctx context.Context, workflowID string) {
 		// Step succeeded
 		outputBytes, _ := json.Marshal(output)
 		e.repo.UpdateStepStatus(step.ID, repository.StepStatusCompleted, outputBytes, nil)
-		log.Printf("[WORKFLOW] Step %d completed: %s", i+1, step.Name)
+		logger.Info("step completed",
+			zap.String("workflow_id", wf.ID),
+			zap.String("step", step.Name),
+		)
 	}
 
 	// All steps done
 	e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusCompleted, len(steps), nil)
-	log.Printf("[WORKFLOW] Completed: %s (id=%s)", wf.Name, wf.ID)
+	metrics.WorkflowsCompleted.WithLabelValues(wf.Name, "completed").Inc()
+	metrics.WorkflowDuration.WithLabelValues(wf.Name).Observe(time.Since(start).Seconds())
+
+	logger.Info("workflow completed",
+		zap.String("workflow_id", wf.ID),
+		zap.String("name", wf.Name),
+		zap.Duration("duration", time.Since(start)),
+	)
 }
 
 // failWorkflow triggers compensation for all previously completed steps.
 func (e *Engine) failWorkflow(wf *repository.Workflow, steps []repository.WorkflowStep, failedAt int, errMsg string) {
 	e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusCompensating, failedAt, &errMsg)
-	log.Printf("[WORKFLOW] Compensating %s from step %d", wf.Name, failedAt)
+
+	logger.Warn("workflow compensating",
+		zap.String("workflow_id", wf.ID),
+		zap.String("name", wf.Name),
+		zap.String("error", errMsg),
+		zap.Int("failed_at_step", failedAt),
+	)
 
 	// Run compensation in reverse order for completed steps
 	for i := failedAt - 1; i >= 0; i-- {
@@ -137,7 +173,9 @@ func (e *Engine) failWorkflow(wf *repository.Workflow, steps []repository.Workfl
 
 		handler, ok := e.handlers[*step.CompensationTaskType]
 		if !ok {
-			log.Printf("[WORKFLOW] No compensation handler for %s", *step.CompensationTaskType)
+			logger.Warn("no compensation handler",
+				zap.String("task_type", *step.CompensationTaskType),
+			)
 			continue
 		}
 
@@ -147,12 +185,19 @@ func (e *Engine) failWorkflow(wf *repository.Workflow, steps []repository.Workfl
 		json.Unmarshal(step.Input, &stepInput)
 
 		if _, err := handler(context.Background(), stepInput); err != nil {
-			log.Printf("[WORKFLOW] Compensation failed for step %d: %v", i, err)
+			logger.Error("compensation failed",
+				zap.String("step", step.Name),
+				zap.Error(err),
+			)
 		} else {
 			e.repo.UpdateStepStatus(step.ID, repository.StepStatusCompensated, nil, nil)
-			log.Printf("[WORKFLOW] Compensated step %d: %s", i, step.Name)
+			logger.Info("step compensated",
+				zap.String("workflow_id", wf.ID),
+				zap.String("step", step.Name),
+			)
 		}
 	}
 
 	e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusCompensated, failedAt, &errMsg)
+	metrics.WorkflowsCompleted.WithLabelValues(wf.Name, "compensated").Inc()
 }

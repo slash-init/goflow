@@ -1,8 +1,8 @@
 package repository
 
 import (
-	"time"
 	"fmt"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 )

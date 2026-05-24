@@ -2,52 +2,55 @@
 
 ## Overview
 
-GoFlow is a distributed task queue and workflow engine. It separates task submission (HTTP API) from task processing (workers) using Redis as the message broker and PostgreSQL as the source of truth. On top of the task queue sits a workflow engine that orchestrates multi-step processes with automatic compensation on failure.
+GoFlow is a distributed task queue and workflow engine. It separates task submission (HTTP API) from task processing (workers) using Redis as the message broker and PostgreSQL as the source of truth. A workflow engine orchestrates multi-step processes with automatic compensation on failure. All components emit structured logs and Prometheus metrics.
 
 ---
 
 ## Component Map
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                        GoFlow Process                        │
-│                                                              │
-│  ┌─────────────┐         ┌──────────────────────┐           │
-│  │  Fiber HTTP │         │    Asynq Worker       │           │
-│  │   Server    │         │    (goroutine)        │           │
-│  │             │         │                       │           │
-│  │  /health    │         │  email:send           │           │
-│  │  /api/v1/   │         │  report:generate      │           │
-│  │    tasks    │         │  task:fail            │           │
-│  │  /api/v1/   │         └──────────────────────-┘           │
-│  │  workflows  │                                             │
-│  └──────┬──────┘         ┌──────────────────────┐           │
-│         │                │   Workflow Engine     │           │
-│         │                │   (goroutine)        │           │
-│         │                │                      │           │
-│         │                │  execute()           │           │
-│         │                │  failWorkflow()      │           │
-│         │                │  StepHandlers        │           │
-│         │                └──────────┬───────────┘           │
-│         │                           │                        │
-│  ┌──────▼───────────────────────────▼──────┐                │
-│  │              Service Layer              │                │
-│  │   TaskService        WorkflowService    │                │
-│  └──────┬───────────────────────┬──────────┘                │
-│         │                       │                            │
-│  ┌──────▼──────┐   ┌────────────▼────────┐                 │
-│  │  Task Repo  │   │  Workflow Repo       │                 │
-│  └──────┬──────┘   └────────────┬─────────┘                 │
-│         │          ┌────────────▼─────────┐                 │
-│         │          │  Queue Client        │                 │
-│         │          │  asynq.Client        │                 │
-│         │          │  asynq.Inspector     │                 │
-│         │          └────────────┬─────────┘                 │
-└─────────┼───────────────────────┼───────────────────────────┘
-          │                       │
-    ┌─────▼──────┐        ┌───────▼─────┐
-    │ PostgreSQL │        │    Redis    │
-    └────────────┘        └─────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                          GoFlow Process                          │
+│                                                                  │
+│  ┌──────────────┐   ┌─────────────────┐   ┌─────────────────┐  │
+│  │  Fiber HTTP  │   │  Asynq Worker   │   │ Workflow Engine  │  │
+│  │  + Middleware│   │  (goroutine)    │   │  (goroutine)    │  │
+│  │              │   │                 │   │                  │  │
+│  │  /health     │   │  email:send     │   │  execute()      │  │
+│  │  /metrics    │   │  report:gen     │   │  failWorkflow() │  │
+│  │  /api/v1/    │   │  task:fail      │   │  StepHandlers   │  │
+│  │    tasks     │   └────────┬────────┘   └────────┬────────┘  │
+│  │  /api/v1/    │            │                      │            │
+│  │    workflows │            └──────────┬───────────┘            │
+│  └──────┬───────┘                       │                        │
+│         │                               │                        │
+│  ┌──────▼───────────────────────────────▼──────┐                │
+│  │                 Service Layer                │                │
+│  │       TaskService        WorkflowService     │                │
+│  └──────┬──────────────────────────┬────────────┘                │
+│         │                          │                              │
+│  ┌──────▼───────┐   ┌─────────────▼──────┐                      │
+│  │  Task Repo   │   │   Workflow Repo     │                      │
+│  └──────┬───────┘   └─────────────┬──────┘                      │
+│         │           ┌─────────────▼──────┐                      │
+│         │           │   Queue Client      │                      │
+│         │           │  asynq.Client       │                      │
+│         │           │  asynq.Inspector    │                      │
+│         │           └─────────────┬──────┘                      │
+│                                   │                              │
+│  ┌────────────────────────────────────────┐                     │
+│  │           Observability                │                     │
+│  │   pkg/logger (Zap)                     │                     │
+│  │   pkg/metrics (Prometheus)             │                     │
+│  │   GET /metrics endpoint                │                     │
+│  └────────────────────────────────────────┘                     │
+└──────────────────────────┬────────────────────────────────────── ┘
+                           │
+          ┌────────────────┼─────────────────┐
+    ┌─────▼──────┐  ┌──────▼──────┐  ┌───────▼──────┐
+    │ PostgreSQL │  │    Redis    │  │  Prometheus  │
+    │            │  │  (Asynq)   │  │  + Grafana   │
+    └────────────┘  └─────────────┘  └──────────────┘
 ```
 
 ---
@@ -56,47 +59,39 @@ GoFlow is a distributed task queue and workflow engine. It separates task submis
 
 ### HTTP Layer — `internal/api/`
 
-Handles incoming requests. Parses body, calls service, writes response. No business logic, no DB access.
+Handles incoming requests. Parses body, calls service, writes response. No business logic or DB access.
 
 - `health.go` — `GET /health`
 - `task.go` — task CRUD + dead-letter endpoints
-- `workflow.go` — `POST /api/v1/workflows`, `GET /api/v1/workflows`, `GET /api/v1/workflows/:id`
+- `workflow.go` — workflow start, list, get
+- `middleware.go` — logs every request (method, path, status, duration) and records HTTP histogram metric
 
 ### Service Layer — `internal/service/`
 
-Business logic. Validates inputs, sets defaults, coordinates repositories and queue client.
-
-- `task.go` — task creation, listing, dead-letter operations
-- `workflow.go` — builds step definitions, delegates to engine
+Business logic. Validates inputs, sets defaults, coordinates repositories and queue client. Emits metrics and structured logs on key operations.
 
 ### Repository Layer — `internal/repository/`
 
 All SQL. No business logic.
 
-- `task.go` — `Task` model, CRUD
-- `workflow.go` — `Workflow` + `WorkflowStep` models, transactional create, status updates
+- `task.go` — Task model, CRUD
+- `workflow.go` — Workflow + WorkflowStep models, transactional create, status updates with explicit enum casting (`$1::step_status`)
 
 ### Workflow Engine — `internal/workflow/`
 
-Orchestrates step execution. Runs in a goroutine per workflow — non-blocking.
+Orchestrates step execution in a goroutine per workflow. Non-blocking — HTTP returns immediately after workflow is created.
 
 - `engine.go` — `StartWorkflow`, `execute`, `failWorkflow`
 - `handlers.go` — `StepDefinition` type, built-in step handler functions
 
 ### Worker — `internal/worker/`
 
-Asynq-based task processor. Separate from the workflow engine — handles one-off async tasks.
+Asynq-based async task processor. Independent from the workflow engine.
 
-- `server.go` — Asynq server config + handler registration
-- `handlers.go` — `HandleSendEmail`, `HandleGenerateReport`, `HandleAlwaysFail`
+### Observability — `pkg/logger` + `pkg/metrics`
 
-### Shared Packages — `pkg/`
-
-| Package | Purpose |
-|---|---|
-| `config` | Loads `.env` via Viper |
-| `database` | PostgreSQL connection via sqlx |
-| `queue` | Asynq client (enqueue) + Inspector (dead-letter ops) |
+- **logger**: Zap-based structured logger. Development mode: colored console. Production: JSON only.
+- **metrics**: Prometheus counters, gauges, and histograms registered at startup. Exposed via `GET /metrics`.
 
 ---
 
@@ -106,16 +101,20 @@ Asynq-based task processor. Separate from the workflow engine — handles one-of
 POST /api/v1/tasks
   │
   ▼
-TaskHandler → TaskService → TaskRepository → INSERT into PostgreSQL
-                         ↘
-                           queue.Client.EnqueueTask() → Redis
-                                                          │
-                                                    Asynq Worker
-                                                          │
-                                               handler fn → return nil/err
-                                                          │
-                                              err: retry with backoff
-                                              retries exhausted: → archived set
+TaskHandler → TaskService
+  │
+  ├── TaskRepository.Create()        → INSERT into PostgreSQL
+  ├── queue.Client.EnqueueTask()     → push to Redis
+  ├── metrics.TasksEnqueued.Inc()    → increment counter
+  └── logger.Info("task enqueued")   → structured log
+            │
+      Asynq Worker (goroutine)
+            │
+      handler fn
+            │
+      ├── metrics.TasksProcessed.Inc()
+      ├── metrics.TaskDuration.Observe()
+      └── return nil / err → retry / dead-letter
 ```
 
 ---
@@ -126,51 +125,53 @@ TaskHandler → TaskService → TaskRepository → INSERT into PostgreSQL
 POST /api/v1/workflows
   │
   ▼
-WorkflowHandler → WorkflowService → engine.StartWorkflow()
-                                          │
-                                   INSERT workflow + steps → PostgreSQL
-                                          │
-                                   go execute()  ← goroutine, non-blocking
-                                   │
-                                   API returns immediately with workflow record
-                                          │
-                              ┌───────────▼────────────┐
-                              │   for each step:        │
-                              │   UPDATE status=running │
-                              │   call StepHandler()    │
-                              │   UPDATE status=completed│
-                              └───────────┬─────────────┘
-                                          │
-                              all steps done → UPDATE workflow status=completed
+WorkflowService.StartOrderWorkflow()
+  │
+  ├── engine.StartWorkflow()
+  │     ├── INSERT workflow + steps → PostgreSQL (transaction)
+  │     ├── metrics.WorkflowsStarted.Inc()
+  │     └── go execute()  ← goroutine, non-blocking
+  │
+  └── return workflow record immediately
+
+goroutine: execute()
+  │
+  for each step:
+    ├── UPDATE step status = running
+    ├── call StepHandler(input) → map[string]any, error
+    ├── UPDATE step status = completed + store output
+    └── logger.Info("step completed")
+  │
+  all done:
+    ├── UPDATE workflow status = completed
+    ├── metrics.WorkflowsCompleted{status="completed"}.Inc()
+    ├── metrics.WorkflowDuration.Observe()
+    └── logger.Info("workflow completed")
 ```
 
 ---
 
 ## Data Flow: Compensation (Saga Pattern)
 
-When a step fails, already-completed steps are rolled back in reverse order:
-
 ```
-Step 1: completed  ──────────────────────────────┐
-Step 2: completed  ────────────────────┐         │
-Step 3: FAILED                         │         │
-  │                                    │         │
-  ▼                                    ▼         ▼
-failWorkflow()              compensate step 2  compensate step 1
-  │                         payment:refund     inventory:release
+StepHandler returns error
   │
-  UPDATE workflow status=compensating
+  ▼
+execute() calls failWorkflow()
   │
-  iterate completed steps in reverse
+  ├── UPDATE workflow status = compensating
+  ├── logger.Warn("workflow compensating")
   │
-  for each step with CompensationTaskType:
-    call compensation handler
-    UPDATE step status=compensated
+  iterate completed steps in REVERSE order:
+    if step.CompensationTaskType != nil:
+      ├── UPDATE step status = compensating
+      ├── call compensation StepHandler()
+      ├── UPDATE step status = compensated
+      └── logger.Info("step compensated")
   │
-  UPDATE workflow status=compensated
+  ├── UPDATE workflow status = compensated
+  └── metrics.WorkflowsCompleted{status="compensated"}.Inc()
 ```
-
-Compensation is best-effort — if a compensation handler fails, it logs and continues to the next step. The workflow ends in `compensated` regardless.
 
 ---
 
@@ -180,13 +181,47 @@ Compensation is best-effort — if a compensation handler fails, it logs and con
 SIGTERM or CTRL+C
   │
   ▼
-signal.Notify → quit channel unblocks in main()
+signal.Notify → quit channel unblocks
   │
-  ├──▶ app.ShutdownWithContext(30s)  — Fiber drains in-flight HTTP requests
-  ├──▶ workerSrv.Shutdown()          — Asynq waits for running tasks to finish
-  └──▶ defer db.Close()              — PostgreSQL connection closed
-       defer queueClient.Close()     — Redis connection closed
+  ├── app.ShutdownWithContext(30s)  — Fiber drains HTTP
+  ├── workerSrv.Shutdown()          — Asynq waits for tasks
+  ├── defer db.Close()
+  └── defer queueClient.Close()
 ```
+
+---
+
+## Observability Stack
+
+```
+GoFlow (:8080/metrics)
+    │  scrape every 5s
+    ▼
+Prometheus (:9090)
+    │  data source
+    ▼
+Grafana (:3000)
+    │
+    └── Dashboard panels:
+        - Tasks enqueued total
+        - Tasks processed (success vs failure)
+        - Workflows started
+        - Workflow outcomes (completed vs compensated)
+        - HTTP p95 latency by route
+```
+
+### Metrics reference
+
+| Metric | Type | Labels |
+|---|---|---|
+| `goflow_tasks_enqueued_total` | Counter | `type`, `queue` |
+| `goflow_tasks_processed_total` | Counter | `type`, `status` |
+| `goflow_task_duration_seconds` | Histogram | `type` |
+| `goflow_dead_tasks_total` | Gauge | `queue` |
+| `goflow_workflows_started_total` | Counter | `name` |
+| `goflow_workflows_completed_total` | Counter | `name`, `status` |
+| `goflow_workflow_duration_seconds` | Histogram | `name` |
+| `goflow_http_request_duration_seconds` | Histogram | `method`, `route`, `status_code` |
 
 ---
 
@@ -196,62 +231,48 @@ signal.Notify → quit channel unblocks in main()
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | UUID | PK, auto-generated |
-| `type` | VARCHAR(255) | Handler identifier |
-| `payload` | JSONB | Task input data |
+| `id` | UUID | PK |
+| `type` | VARCHAR | Handler identifier |
+| `payload` | JSONB | Task input |
 | `status` | ENUM | `pending` `processing` `completed` `failed` `dead` |
-| `priority` | INTEGER | Higher = more urgent |
-| `max_retries` | INTEGER | Max retry attempts |
-| `retries` | INTEGER | Current retry count |
+| `priority` | INTEGER | |
+| `max_retries` | INTEGER | |
+| `retries` | INTEGER | |
 | `last_error` | TEXT | Nullable |
 | `run_at` | TIMESTAMPTZ | Supports delayed tasks |
-| `created_at` | TIMESTAMPTZ | Auto-set |
-| `updated_at` | TIMESTAMPTZ | Auto-set |
+| `created_at` | TIMESTAMPTZ | |
+| `updated_at` | TIMESTAMPTZ | |
 
 ### `workflows`
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | UUID | PK, auto-generated |
-| `name` | VARCHAR(255) | Workflow identifier e.g. `order:process` |
+| `id` | UUID | PK |
+| `name` | VARCHAR | e.g. `order:process` |
 | `status` | ENUM | `pending` `running` `completed` `failed` `compensating` `compensated` |
 | `input` | JSONB | Workflow-level input |
-| `current_step` | INTEGER | Index of the step currently executing |
-| `last_error` | TEXT | Nullable — set on failure |
-| `created_at` | TIMESTAMPTZ | Auto-set |
-| `updated_at` | TIMESTAMPTZ | Auto-set |
+| `current_step` | INTEGER | Index of active step |
+| `last_error` | TEXT | Nullable |
+| `created_at` | TIMESTAMPTZ | |
+| `updated_at` | TIMESTAMPTZ | |
 
 ### `workflow_steps`
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | UUID | PK, auto-generated |
-| `workflow_id` | UUID | FK → workflows.id |
-| `step_index` | INTEGER | Order of execution (0-based) |
-| `name` | VARCHAR(255) | Human-readable step name |
-| `task_type` | VARCHAR(255) | Maps to a registered StepHandler |
+| `id` | UUID | PK |
+| `workflow_id` | UUID | FK → workflows |
+| `step_index` | INTEGER | 0-based execution order |
+| `name` | VARCHAR | Human-readable |
+| `task_type` | VARCHAR | Maps to StepHandler |
 | `status` | ENUM | `pending` `running` `completed` `failed` `compensating` `compensated` `skipped` |
-| `input` | JSONB | Step input data |
-| `output` | JSONB | Nullable — populated on success |
-| `last_error` | TEXT | Nullable — populated on failure |
-| `compensation_task_type` | VARCHAR(255) | Nullable — handler to run on rollback |
-| `started_at` | TIMESTAMPTZ | Set when status → running |
-| `completed_at` | TIMESTAMPTZ | Set when status → completed/failed/compensated |
-| `created_at` | TIMESTAMPTZ | Auto-set |
-
-Indexes: `idx_workflow_steps_workflow_id`, `idx_workflows_status`
-
----
-
-## Queue Configuration
-
-| Queue | Weight | Use for |
-|---|---|---|
-| `critical` | 6 | ~60% of capacity |
-| `default` | 3 | ~30% of capacity |
-| `low` | 1 | ~10% of capacity |
-
-Worker concurrency: 10. Retry backoff: exponential (managed by Asynq).
+| `input` | JSONB | Step input |
+| `output` | JSONB | Nullable, set on success |
+| `last_error` | TEXT | Nullable |
+| `compensation_task_type` | VARCHAR | Nullable |
+| `started_at` | TIMESTAMPTZ | Set on status→running |
+| `completed_at` | TIMESTAMPTZ | Set on terminal status |
+| `created_at` | TIMESTAMPTZ | |
 
 ---
 
@@ -260,35 +281,35 @@ Worker concurrency: 10. Retry backoff: exponential (managed by Asynq).
 | Service | Image | Port | Purpose |
 |---|---|---|---|
 | PostgreSQL | `postgres:16-alpine` | 5432 | Task + workflow persistence |
-| Redis | `redis:7-alpine` | 6379 | Asynq queue broker + dead-letter store |
+| Redis | `redis:7-alpine` | 6379 | Asynq queue + dead-letter |
+| Prometheus | `prom/prometheus:latest` | 9090 | Metrics collection |
+| Grafana | `grafana/grafana:latest` | 3000 | Metrics visualisation |
 
 ---
 
 ## Key Design Decisions
 
-**Workflow runs in a goroutine, not a separate task**: Each workflow execution is a goroutine spawned by `StartWorkflow`. This keeps things simple — no separate scheduler, no polling. The tradeoff is that if the process crashes mid-workflow, the workflow won't resume automatically. Crash recovery is a planned feature.
+**Write-then-enqueue**: PostgreSQL write happens before Redis enqueue. Prevents silent loss if Redis is briefly unavailable.
 
-**Saga compensation is reverse-order**: Completed steps are compensated newest-first. This mirrors how database transactions roll back — last operation undone first.
+**Workflow in goroutine, not separate process**: Simple for now. Tradeoff: crash mid-workflow means the workflow won't resume. Crash recovery is a planned feature.
 
-**Write-then-enqueue for tasks**: Tasks are saved to PostgreSQL before Redis. If Redis is down, the record exists and can be re-enqueued manually.
+**Saga compensation is reverse-order and best-effort**: Mirrors transaction rollback semantics. If a compensation handler itself fails, it logs and continues — the workflow still ends in `compensated`.
 
-**Step output stored as JSONB**: Each step's output is persisted so later steps could reference earlier results. The current implementation passes the original workflow input to every step — chaining step outputs as inputs to subsequent steps is a planned enhancement.
+**Explicit enum casting**: `$1::step_status` in SQL updates. Required because `lib/pq` doesn't automatically coerce strings to PostgreSQL enums in all contexts.
 
-**No ORM**: Raw SQL via `sqlx`. Full control, no magic, easy to audit.
+**SELinux-aware volume mount**: Prometheus config mounted with `:z` flag so SELinux relabels the file context for Docker access.
 
-**Explicit enum casting in PostgreSQL**: Status updates use `$1::step_status` and `$1::workflow_status` to avoid `lib/pq` silently failing on enum comparisons.
+**Structured logging everywhere**: All `log.Printf` replaced with `logger.Info/Error/Warn` from Zap. Every log line includes structured fields — no string formatting, fully machine-parseable.
 
 ---
 
 ## What's Not Built Yet
 
-- Crash recovery for in-flight workflows (process restart resumes from current step)
+- Crash recovery for in-flight workflows
 - Step output chaining (pass step N output as input to step N+1)
 - Parallel step execution
-- Conditional branching in workflows
-- Task status sync to PostgreSQL after Asynq processes
-- Observability (Prometheus, OpenTelemetry, Grafana)
-- Admin dashboard
+- Conditional workflow branching
+- Task status sync to PostgreSQL post-processing
 - Auth (JWT)
-- Separate worker binary for independent scaling
-- Docker image for the Go app
+- Makefile + Dockerfile for the Go app
+- Full containerised deployment

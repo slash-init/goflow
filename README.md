@@ -1,6 +1,6 @@
 # GoFlow
 
-A distributed task queue and workflow engine built in Go. Tasks are enqueued via a REST API, persisted in PostgreSQL, queued through Redis, and processed by concurrent workers with automatic retries, priority queues, dead-letter queue management, and multi-step workflow orchestration with compensation.
+A distributed task queue and workflow engine built in Go. Tasks are enqueued via a REST API, persisted in PostgreSQL, queued through Redis, and processed by concurrent workers with automatic retries, priority queues, dead-letter queue management, multi-step workflow orchestration with compensation, and full observability via Prometheus and Grafana.
 
 ---
 
@@ -25,11 +25,15 @@ docker compose up -d
 docker exec -i goflow_postgres psql -U goflow -d goflow_db < migrations/001_create_tasks.sql
 docker exec -i goflow_postgres psql -U goflow -d goflow_db < migrations/002_create_workflows.sql
 
-# Start the server (HTTP + worker runs together)
+# Start the server
 go run cmd/server/main.go
 ```
 
-Server starts on `http://localhost:8080`.
+| Service | URL |
+|---|---|
+| GoFlow API | http://localhost:8080 |
+| Prometheus | http://localhost:9090 |
+| Grafana | http://localhost:3000 (admin/admin) |
 
 ---
 
@@ -39,6 +43,7 @@ Create a `.env` file in the project root:
 
 ```env
 APP_PORT=8080
+APP_ENV=development
 
 DB_HOST=localhost
 DB_PORT=5432
@@ -63,6 +68,16 @@ Response:
 ```json
 { "status": "ok", "service": "goflow" }
 ```
+
+---
+
+### Metrics
+
+```
+GET /metrics
+```
+
+Prometheus-format metrics. Scrape this endpoint from Prometheus.
 
 ---
 
@@ -105,15 +120,11 @@ Response `201 Created`: task object.
 GET /api/v1/tasks
 ```
 
----
-
 #### Get a task by ID
 
 ```
 GET /api/v1/tasks/:id
 ```
-
----
 
 #### List dead tasks
 
@@ -121,33 +132,11 @@ GET /api/v1/tasks/:id
 GET /api/v1/tasks/dead?queue=default
 ```
 
-Response:
-```json
-{
-  "queue": "default",
-  "count": 1,
-  "tasks": [
-    {
-      "id": "uuid",
-      "type": "task:fail",
-      "payload": "{}",
-      "queue": "default",
-      "last_error": "intentional failure for testing",
-      "last_failed_at": "2026-05-21T13:49:53+05:30"
-    }
-  ]
-}
-```
-
----
-
 #### Retry a dead task
 
 ```
 POST /api/v1/tasks/dead/:id/retry?queue=default
 ```
-
----
 
 #### Delete a dead task
 
@@ -176,20 +165,11 @@ Body:
 }
 ```
 
-The workflow starts immediately and runs in the background. The API returns as soon as the workflow is created — you don't wait for it to finish.
+The workflow starts immediately and runs in the background. The API returns as soon as the workflow record is created.
 
-Response `201 Created`:
-```json
-{
-  "ID": "uuid",
-  "Name": "order:process",
-  "Status": "running",
-  "CurrentStep": 0,
-  "CreatedAt": "..."
-}
-```
+To trigger compensation (for testing), set `amount > 1000` — the payment handler will decline it and compensation will run in reverse.
 
----
+Response `201 Created`: workflow object.
 
 #### List all workflows
 
@@ -197,40 +177,14 @@ Response `201 Created`:
 GET /api/v1/workflows
 ```
 
----
-
-#### Get a workflow with step details
+#### Get workflow + step details
 
 ```
 GET /api/v1/workflows/:id
 ```
 
-Response:
-```json
-{
-  "workflow": {
-    "ID": "uuid",
-    "Name": "order:process",
-    "Status": "completed",
-    "CurrentStep": 3,
-    "LastError": null
-  },
-  "steps": [
-    {
-      "StepIndex": 0,
-      "Name": "Reserve Inventory",
-      "TaskType": "inventory:reserve",
-      "Status": "completed",
-      "Output": "...",
-      "StartedAt": "...",
-      "CompletedAt": "..."
-    }
-  ]
-}
-```
-
-Possible workflow statuses: `pending`, `running`, `completed`, `failed`, `compensating`, `compensated`.
-Possible step statuses: `pending`, `running`, `completed`, `failed`, `compensating`, `compensated`, `skipped`.
+Possible workflow statuses: `pending` `running` `completed` `failed` `compensating` `compensated`
+Possible step statuses: `pending` `running` `completed` `failed` `compensating` `compensated` `skipped`
 
 ---
 
@@ -246,31 +200,13 @@ Possible step statuses: `pending`, `running`, `completed`, `failed`, `compensati
 
 ## Built-in Workflow Step Handlers
 
-| Task Type | Description | Has Compensation |
+| Task Type | Description | Compensation |
 |---|---|---|
-| `inventory:reserve` | Reserves inventory for an order | yes → `inventory:release` |
-| `inventory:release` | Releases reserved inventory (compensation) | no |
-| `payment:charge` | Charges payment for an order | yes → `payment:refund` |
-| `payment:refund` | Refunds a charge (compensation) | no |
-| `notification:send` | Sends order confirmation | no |
-
-To add a new step handler: implement a `StepHandler` function and call `engine.RegisterHandler(taskType, fn)`.
-
----
-
-## Workflow: Order Processing
-
-The built-in `order:process` workflow runs three steps in sequence:
-
-```
-Step 1: inventory:reserve   → compensation: inventory:release
-Step 2: payment:charge      → compensation: payment:refund
-Step 3: notification:send   → no compensation
-```
-
-If any step fails, compensation runs in reverse order for all previously completed steps. For example, if `payment:charge` fails, `inventory:release` runs to undo step 1.
-
-To trigger a failure for testing, set `amount > 1000` — the payment handler will decline it.
+| `inventory:reserve` | Reserves inventory | `inventory:release` |
+| `inventory:release` | Releases inventory (compensation) | — |
+| `payment:charge` | Charges payment | `payment:refund` |
+| `payment:refund` | Refunds charge (compensation) | — |
+| `notification:send` | Sends confirmation | — |
 
 ---
 
@@ -280,27 +216,67 @@ To trigger a failure for testing, set `amount > 1000` — the payment handler wi
 |---|---|---|
 | `critical` | 6 | Time-sensitive tasks |
 | `default` | 3 | Normal tasks |
-| `low` | 1 | Background/non-urgent tasks |
+| `low` | 1 | Background tasks |
 
 Worker concurrency: 10 simultaneous tasks.
 
 ---
 
-## Retry & Dead-Letter Behaviour
+## Observability
 
-- Failed tasks are automatically retried with exponential backoff
-- After `max_retries` exhausted, tasks move to the dead-letter queue
-- Dead tasks are inspectable, retryable, and deletable via API
+### Metrics (Prometheus)
+
+All metrics are exposed at `GET /metrics` in Prometheus format.
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `goflow_tasks_enqueued_total` | Counter | `type`, `queue` | Tasks enqueued |
+| `goflow_tasks_processed_total` | Counter | `type`, `status` | Tasks processed (status: success/failure) |
+| `goflow_task_duration_seconds` | Histogram | `type` | Task processing duration |
+| `goflow_dead_tasks_total` | Gauge | `queue` | Tasks in dead-letter queue |
+| `goflow_workflows_started_total` | Counter | `name` | Workflows started |
+| `goflow_workflows_completed_total` | Counter | `name`, `status` | Workflows completed (status: completed/compensated/failed) |
+| `goflow_workflow_duration_seconds` | Histogram | `name` | Workflow execution duration |
+| `goflow_http_request_duration_seconds` | Histogram | `method`, `route`, `status_code` | HTTP request duration |
+
+### Useful PromQL queries
+
+```promql
+# Workflow success vs compensation rate
+rate(goflow_workflows_completed_total[1m])
+
+# HTTP p95 latency by route
+histogram_quantile(0.95, rate(goflow_http_request_duration_seconds_bucket[1m]))
+
+# Task failure rate
+rate(goflow_tasks_processed_total{status="failure"}[5m])
+```
+
+### Logging (Zap)
+
+Structured JSON logs with level, timestamp, caller, and contextual fields:
+
+```json
+{"level":"INFO","ts":"2026-05-24T12:00:01.695+0530","msg":"step completed","workflow_id":"...","step":"Reserve Inventory"}
+{"level":"ERROR","ts":"...","msg":"step failed","workflow_id":"...","step":"Charge Payment","error":"payment declined"}
+```
+
+Set `APP_ENV=production` for JSON-only logs. `APP_ENV=development` gives colored console output.
+
+### Grafana dashboard
+
+1. Open http://localhost:3000 (admin/admin)
+2. Add Prometheus data source: URL = `http://prometheus:9090`
+3. Create panels with the PromQL queries above
 
 ---
 
 ## Graceful Shutdown
 
-The server handles `CTRL+C` and `SIGTERM` cleanly:
-
+Handles `CTRL+C` and `SIGTERM`:
 1. Stops accepting new HTTP requests
-2. Waits up to 30 seconds for in-flight HTTP requests to finish
-3. Waits for any currently-running worker tasks to complete
+2. Waits up to 30s for in-flight requests to finish
+3. Waits for running worker tasks to complete
 4. Closes DB and Redis connections
 
 ---
@@ -309,31 +285,36 @@ The server handles `CTRL+C` and `SIGTERM` cleanly:
 
 ```
 goflow/
-├── cmd/server/main.go          # Entry point — wires everything, handles shutdown
+├── cmd/server/main.go          # Entry point
 ├── internal/
-│   ├── api/                    # HTTP handlers
+│   ├── api/                    # HTTP handlers + middleware
 │   │   ├── health.go
 │   │   ├── task.go
-│   │   └── workflow.go
+│   │   ├── workflow.go
+│   │   └── middleware.go       # Request logger + metrics
 │   ├── service/
-│   │   ├── task.go             # Task business logic
-│   │   └── workflow.go         # Workflow business logic
+│   │   ├── task.go
+│   │   └── workflow.go
 │   ├── repository/
-│   │   ├── task.go             # Task DB queries + model
-│   │   └── workflow.go         # Workflow + step DB queries + models
+│   │   ├── task.go
+│   │   └── workflow.go
 │   ├── worker/
-│   │   ├── server.go           # Asynq worker server
-│   │   └── handlers.go         # Task processing functions
+│   │   ├── server.go
+│   │   └── handlers.go
 │   └── workflow/
-│       ├── engine.go           # Workflow orchestration engine
-│       └── handlers.go         # Step handler functions + StepDefinition
+│       ├── engine.go
+│       └── handlers.go
 ├── pkg/
-│   ├── config/config.go        # Env config via Viper
-│   ├── database/postgres.go    # PostgreSQL connection
-│   └── queue/client.go         # Asynq client + Inspector
+│   ├── config/config.go
+│   ├── database/postgres.go
+│   ├── queue/client.go
+│   ├── logger/logger.go        # Zap structured logger
+│   └── metrics/metrics.go      # Prometheus metric definitions
 ├── migrations/
 │   ├── 001_create_tasks.sql
 │   └── 002_create_workflows.sql
+├── observability/
+│   └── prometheus.yml          # Prometheus scrape config
 ├── docker-compose.yml
 ├── .env
 └── go.mod
@@ -341,21 +322,21 @@ goflow/
 
 ---
 
-## Running Infrastructure Only
+## Running Infrastructure
 
 ```bash
-docker compose up -d            # Start postgres + redis
+docker compose up -d            # Start all services
 docker compose ps               # Check status
 docker compose down             # Stop
-docker compose down -v          # Stop + delete volumes (wipes DB)
+docker compose down -v          # Stop + wipe volumes
 ```
 
 ---
 
 ## What's Coming
 
-- Observability (Prometheus metrics, OpenTelemetry tracing, Grafana dashboard)
-- Admin UI (monitor queues, tasks, workflows in browser)
+- Makefile for common dev tasks
+- Dockerfile for the Go app
+- Full containerised deployment
 - Auth (JWT)
-- Docker image for the Go app + full containerised deployment
 - Parallel workflow steps

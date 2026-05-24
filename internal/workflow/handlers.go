@@ -16,11 +16,6 @@ type StepDefinition struct {
 	CompensationTaskType *string // nil = no compensation needed
 }
 
-// Helper to make compensation pointer cleaner at call sites
-func withCompensation(taskType string) *string {
-	return &taskType
-}
-
 // registerBuiltinHandlers wires up the demo handlers.
 func (e *Engine) registerBuiltinHandlers() {
 	e.RegisterHandler("inventory:reserve", handleReserveInventory)

@@ -74,7 +74,6 @@ func (e *Engine) StartWorkflow(ctx context.Context, name string, stepDefs []Step
 	return wf, nil
 }
 
-// execute runs all steps in order.
 func (e *Engine) execute(ctx context.Context, workflowID string) {
 	start := time.Now()
 
@@ -96,9 +95,12 @@ func (e *Engine) execute(ctx context.Context, workflowID string) {
 	for i := range steps {
 		step := &steps[i]
 
-		// Mark step as running
-		e.repo.UpdateStepStatus(step.ID, repository.StepStatusRunning, nil, nil)
-		e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusRunning, i, nil)
+		if err := e.repo.UpdateStepStatus(step.ID, repository.StepStatusRunning, nil, nil); err != nil {
+			logger.Error("failed to update step status", zap.String("step_id", step.ID), zap.Error(err))
+		}
+		if err := e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusRunning, i, nil); err != nil {
+			logger.Error("failed to update workflow status", zap.String("workflow_id", wf.ID), zap.Error(err))
+		}
 
 		logger.Info("step started",
 			zap.String("workflow_id", wf.ID),
@@ -106,7 +108,6 @@ func (e *Engine) execute(ctx context.Context, workflowID string) {
 			zap.Int("index", i),
 		)
 
-		// Get the handler for this step's task type
 		handler, ok := e.handlers[step.TaskType]
 		if !ok {
 			errMsg := fmt.Sprintf("no handler registered for task type: %s", step.TaskType)
@@ -114,11 +115,13 @@ func (e *Engine) execute(ctx context.Context, workflowID string) {
 			return
 		}
 
-		// Unmarshal step input
 		var stepInput map[string]any
-		json.Unmarshal(step.Input, &stepInput)
+		if err := json.Unmarshal(step.Input, &stepInput); err != nil {
+			logger.Error("failed to unmarshal step input", zap.String("step_id", step.ID), zap.Error(err))
+			e.failWorkflow(wf, steps, i, err.Error())
+			return
+		}
 
-		// Run the handler
 		output, err := handler(ctx, stepInput)
 		if err != nil {
 			errMsg := err.Error()
@@ -127,22 +130,26 @@ func (e *Engine) execute(ctx context.Context, workflowID string) {
 				zap.String("step", step.Name),
 				zap.Error(err),
 			)
-			e.repo.UpdateStepStatus(step.ID, repository.StepStatusFailed, nil, &errMsg)
+			if err := e.repo.UpdateStepStatus(step.ID, repository.StepStatusFailed, nil, &errMsg); err != nil {
+				logger.Error("failed to update step status", zap.String("step_id", step.ID), zap.Error(err))
+			}
 			e.failWorkflow(wf, steps, i, errMsg)
 			return
 		}
 
-		// Step succeeded
 		outputBytes, _ := json.Marshal(output)
-		e.repo.UpdateStepStatus(step.ID, repository.StepStatusCompleted, outputBytes, nil)
+		if err := e.repo.UpdateStepStatus(step.ID, repository.StepStatusCompleted, outputBytes, nil); err != nil {
+			logger.Error("failed to update step status", zap.String("step_id", step.ID), zap.Error(err))
+		}
 		logger.Info("step completed",
 			zap.String("workflow_id", wf.ID),
 			zap.String("step", step.Name),
 		)
 	}
 
-	// All steps done
-	e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusCompleted, len(steps), nil)
+	if err := e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusCompleted, len(steps), nil); err != nil {
+		logger.Error("failed to update workflow status", zap.String("workflow_id", wf.ID), zap.Error(err))
+	}
 	metrics.WorkflowsCompleted.WithLabelValues(wf.Name, "completed").Inc()
 	metrics.WorkflowDuration.WithLabelValues(wf.Name).Observe(time.Since(start).Seconds())
 
@@ -153,9 +160,10 @@ func (e *Engine) execute(ctx context.Context, workflowID string) {
 	)
 }
 
-// failWorkflow triggers compensation for all previously completed steps.
 func (e *Engine) failWorkflow(wf *repository.Workflow, steps []repository.WorkflowStep, failedAt int, errMsg string) {
-	e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusCompensating, failedAt, &errMsg)
+	if err := e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusCompensating, failedAt, &errMsg); err != nil {
+		logger.Error("failed to update workflow status", zap.String("workflow_id", wf.ID), zap.Error(err))
+	}
 
 	logger.Warn("workflow compensating",
 		zap.String("workflow_id", wf.ID),
@@ -164,7 +172,6 @@ func (e *Engine) failWorkflow(wf *repository.Workflow, steps []repository.Workfl
 		zap.Int("failed_at_step", failedAt),
 	)
 
-	// Run compensation in reverse order for completed steps
 	for i := failedAt - 1; i >= 0; i-- {
 		step := steps[i]
 		if step.CompensationTaskType == nil {
@@ -179,10 +186,15 @@ func (e *Engine) failWorkflow(wf *repository.Workflow, steps []repository.Workfl
 			continue
 		}
 
-		e.repo.UpdateStepStatus(step.ID, repository.StepStatusCompensating, nil, nil)
+		if err := e.repo.UpdateStepStatus(step.ID, repository.StepStatusCompensating, nil, nil); err != nil {
+			logger.Error("failed to update step status", zap.String("step_id", step.ID), zap.Error(err))
+		}
 
 		var stepInput map[string]any
-		json.Unmarshal(step.Input, &stepInput)
+		if err := json.Unmarshal(step.Input, &stepInput); err != nil {
+			logger.Error("failed to unmarshal step input", zap.String("step_id", step.ID), zap.Error(err))
+			continue
+		}
 
 		if _, err := handler(context.Background(), stepInput); err != nil {
 			logger.Error("compensation failed",
@@ -190,7 +202,9 @@ func (e *Engine) failWorkflow(wf *repository.Workflow, steps []repository.Workfl
 				zap.Error(err),
 			)
 		} else {
-			e.repo.UpdateStepStatus(step.ID, repository.StepStatusCompensated, nil, nil)
+			if err := e.repo.UpdateStepStatus(step.ID, repository.StepStatusCompensated, nil, nil); err != nil {
+				logger.Error("failed to update step status", zap.String("step_id", step.ID), zap.Error(err))
+			}
 			logger.Info("step compensated",
 				zap.String("workflow_id", wf.ID),
 				zap.String("step", step.Name),
@@ -198,6 +212,8 @@ func (e *Engine) failWorkflow(wf *repository.Workflow, steps []repository.Workfl
 		}
 	}
 
-	e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusCompensated, failedAt, &errMsg)
+	if err := e.repo.UpdateWorkflowStatus(wf.ID, repository.WorkflowStatusCompensated, failedAt, &errMsg); err != nil {
+		logger.Error("failed to update workflow status", zap.String("workflow_id", wf.ID), zap.Error(err))
+	}
 	metrics.WorkflowsCompleted.WithLabelValues(wf.Name, "compensated").Inc()
 }

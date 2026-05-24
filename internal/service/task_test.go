@@ -3,8 +3,8 @@ package service_test
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/slash-init/goflow/internal/service"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCreateTask_MissingType(t *testing.T) {

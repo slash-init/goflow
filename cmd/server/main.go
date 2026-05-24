@@ -15,10 +15,10 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	_ "github.com/slash-init/goflow/docs"
+	fiberSwagger "github.com/swaggo/fiber-swagger"
 	"github.com/valyala/fasthttp/fasthttpadaptor"
 	"go.uber.org/zap"
-	fiberSwagger "github.com/swaggo/fiber-swagger"
-    _ "github.com/slash-init/goflow/docs"
 
 	"github.com/slash-init/goflow/internal/api"
 	"github.com/slash-init/goflow/internal/repository"
@@ -103,12 +103,12 @@ func main() {
 		}
 	}()
 
-	// Block here until we recieve a shutdown signal
+	// Block here until we receive a shutdown signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit // execution pauses here until signal arrives
 
-	logger.Info("Shutdown signal recieved - draining...")
+	logger.Info("Shutdown signal received - draining...")
 
 	// Give everything 30 seconds to finish
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

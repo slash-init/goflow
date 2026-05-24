@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/slash-init/goflow/internal/workflow"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestStepDefinition_WithCompensation(t *testing.T) {

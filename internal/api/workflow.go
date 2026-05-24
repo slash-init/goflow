@@ -13,6 +13,16 @@ func NewWorkflowHandler(svc *service.WorkflowService) *WorkflowHandler {
 	return &WorkflowHandler{svc: svc}
 }
 
+// StartWorkflow godoc
+// @Summary      Start a workflow
+// @Description  Create and immediately start a multi-step workflow
+// @Tags         workflows
+// @Accept       json
+// @Produce      json
+// @Param        workflow body service.CreateWorkflowInput true "Workflow input"
+// @Success      201  {object}  repository.Workflow
+// @Failure      400  {object}  map[string]string
+// @Router       /workflows [post]
 func (h *WorkflowHandler) StartWorkflow(c *fiber.Ctx) error {
 	var input service.CreateWorkflowInput
 	if err := c.BodyParser(&input); err != nil {
@@ -35,6 +45,14 @@ func (h *WorkflowHandler) StartWorkflow(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(wf)
 }
 
+// GetWorkflow godoc
+// @Summary      Get workflow with step details
+// @Tags         workflows
+// @Produce      json
+// @Param        id   path      string  true  "Workflow ID"
+// @Success      200  {object}  map[string]any
+// @Failure      404  {object}  map[string]string
+// @Router       /workflows/{id} [get]
 func (h *WorkflowHandler) GetWorkflow(c *fiber.Ctx) error {
 	id := c.Params("id")
 	wf, steps, err := h.svc.GetWorkflow(id)
@@ -50,6 +68,12 @@ func (h *WorkflowHandler) GetWorkflow(c *fiber.Ctx) error {
 	})
 }
 
+// GetAllWorkflows godoc
+// @Summary      List all workflows
+// @Tags         workflows
+// @Produce      json
+// @Success      200  {object}  map[string]any
+// @Router       /workflows [get]
 func (h *WorkflowHandler) GetAllWorkflows(c *fiber.Ctx) error {
 	workflows, err := h.svc.GetAllWorkflows()
 	if err != nil {

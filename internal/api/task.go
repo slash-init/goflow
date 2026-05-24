@@ -13,6 +13,16 @@ func NewTaskHandler(svc *service.TaskService) *TaskHandler {
 	return &TaskHandler{svc: svc}
 }
 
+// CreateTask godoc
+// @Summary      Create a task
+// @Description  Enqueue a new task for async processing
+// @Tags         tasks
+// @Accept       json
+// @Produce      json
+// @Param        task body service.CreateTaskInput true "Task input"
+// @Success      201  {object}  repository.Task
+// @Failure      400  {object}  map[string]string
+// @Router       /tasks [post]
 func (h *TaskHandler) CreateTask(c *fiber.Ctx) error {
 	var input service.CreateTaskInput
 
@@ -33,6 +43,12 @@ func (h *TaskHandler) CreateTask(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(task)
 }
 
+// GetAllTasks godoc
+// @Summary      List all tasks
+// @Tags         tasks
+// @Produce      json
+// @Success      200  {object}  map[string]any
+// @Router       /tasks [get]
 func (h *TaskHandler) GetAllTasks(c *fiber.Ctx) error {
 	tasks, err := h.svc.GetAllTasks()
 	if err != nil {
@@ -47,6 +63,14 @@ func (h *TaskHandler) GetAllTasks(c *fiber.Ctx) error {
 	})
 }
 
+// GetTaskByID godoc
+// @Summary      Get task by ID
+// @Tags         tasks
+// @Produce      json
+// @Param        id   path      string  true  "Task ID"
+// @Success      200  {object}  repository.Task
+// @Failure      404  {object}  map[string]string
+// @Router       /tasks/{id} [get]
 func (h *TaskHandler) GetTaskByID(c *fiber.Ctx) error {
 	id := c.Params("id") // like req.params.id in Express
 

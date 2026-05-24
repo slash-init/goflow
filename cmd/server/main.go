@@ -1,3 +1,9 @@
+// @title           GoFlow API
+// @version         1.0
+// @description     Distributed task queue and workflow engine
+// @host            localhost:8080
+// @BasePath        /api/v1
+
 package main
 
 import (
@@ -11,6 +17,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/valyala/fasthttp/fasthttpadaptor"
 	"go.uber.org/zap"
+	fiberSwagger "github.com/swaggo/fiber-swagger"
+    _ "github.com/slash-init/goflow/docs"
 
 	"github.com/slash-init/goflow/internal/api"
 	"github.com/slash-init/goflow/internal/repository"
@@ -72,6 +80,7 @@ func main() {
 
 	// Routes
 	app.Get("/health", api.HealthHandler)
+	app.Get("/swagger/*", fiberSwagger.WrapHandler)
 
 	v1 := app.Group("/api/v1")
 	v1.Post("/tasks", taskHandler.CreateTask)

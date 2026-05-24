@@ -1,0 +1,244 @@
+basePath: /api/v1
+definitions:
+  repository.Task:
+    properties:
+      createdAt:
+        type: string
+      id:
+        description: db:"..." tags tell sqlx which struct field matches which SQL
+          column
+        type: string
+      lastError:
+        description: pointer = nullable
+        type: string
+      maxRetries:
+        type: integer
+      payload:
+        items:
+          type: integer
+        type: array
+      priority:
+        type: integer
+      retries:
+        type: integer
+      runAt:
+        type: string
+      status:
+        $ref: '#/definitions/repository.TaskStatus'
+      type:
+        type: string
+      updatedAt:
+        type: string
+    type: object
+  repository.TaskStatus:
+    enum:
+    - pending
+    - processing
+    - completed
+    - failed
+    - dead
+    type: string
+    x-enum-varnames:
+    - TaskStatusPending
+    - TaskStatusProcessing
+    - TaskStatusCompleted
+    - TaskStatusFailed
+    - TaskStatusDead
+  repository.Workflow:
+    properties:
+      createdAt:
+        type: string
+      currentStep:
+        type: integer
+      id:
+        type: string
+      input:
+        items:
+          type: integer
+        type: array
+      lastError:
+        type: string
+      name:
+        type: string
+      status:
+        $ref: '#/definitions/repository.WorkflowStatus'
+      updatedAt:
+        type: string
+    type: object
+  repository.WorkflowStatus:
+    enum:
+    - pending
+    - running
+    - completed
+    - failed
+    - compensating
+    - compensated
+    type: string
+    x-enum-varnames:
+    - WorkflowStatusPending
+    - WorkflowStatusRunning
+    - WorkflowStatusCompleted
+    - WorkflowStatusFailed
+    - WorkflowStatusCompensating
+    - WorkflowStatusCompensated
+  service.CreateTaskInput:
+    properties:
+      delay_seconds:
+        type: integer
+      max_retries:
+        type: integer
+      payload:
+        additionalProperties: {}
+        type: object
+      priority:
+        type: integer
+      queue:
+        type: string
+      type:
+        type: string
+    type: object
+  service.CreateWorkflowInput:
+    properties:
+      input:
+        additionalProperties: {}
+        type: object
+      name:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: Distributed task queue and workflow engine
+  title: GoFlow API
+  version: "1.0"
+paths:
+  /tasks:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List all tasks
+      tags:
+      - tasks
+    post:
+      consumes:
+      - application/json
+      description: Enqueue a new task for async processing
+      parameters:
+      - description: Task input
+        in: body
+        name: task
+        required: true
+        schema:
+          $ref: '#/definitions/service.CreateTaskInput'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/repository.Task'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Create a task
+      tags:
+      - tasks
+  /tasks/{id}:
+    get:
+      parameters:
+      - description: Task ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/repository.Task'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get task by ID
+      tags:
+      - tasks
+  /workflows:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List all workflows
+      tags:
+      - workflows
+    post:
+      consumes:
+      - application/json
+      description: Create and immediately start a multi-step workflow
+      parameters:
+      - description: Workflow input
+        in: body
+        name: workflow
+        required: true
+        schema:
+          $ref: '#/definitions/service.CreateWorkflowInput'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/repository.Workflow'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Start a workflow
+      tags:
+      - workflows
+  /workflows/{id}:
+    get:
+      parameters:
+      - description: Workflow ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Get workflow with step details
+      tags:
+      - workflows
+swagger: "2.0"

@@ -29,7 +29,7 @@ func LoggerMiddleware() fiber.Handler {
 
 		metrics.HTTPRequestDuration.
 			WithLabelValues(
-				c.Method(),
+				string(c.Method()),
 				c.Route().Path,
 				strconv.Itoa(status),
 			).

@@ -3,7 +3,9 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"log"
+
+	"github.com/slash-init/goflow/pkg/logger"
+	"go.uber.org/zap"
 )
 
 // StepDefinition describes one step in a workflow.
@@ -30,21 +32,24 @@ func (e *Engine) registerBuiltinHandlers() {
 
 func handleReserveInventory(ctx context.Context, input map[string]any) (map[string]any, error) {
 	orderID := input["order_id"]
-	log.Printf("[INVENTORY] Reserving inventory for order %v", orderID)
+	logger.Info("reserving inventory", zap.Any("order_id", orderID))
 	// Real impl: call inventory service or update DB
 	return map[string]any{"reservation_id": "res_123", "order_id": orderID}, nil
 }
 
 func handleReleaseInventory(ctx context.Context, input map[string]any) (map[string]any, error) {
 	orderID := input["order_id"]
-	log.Printf("[INVENTORY] Releasing inventory for order %v", orderID)
+	logger.Info("releasing inventory", zap.Any("order_id", orderID))
 	return map[string]any{"released": true}, nil
 }
 
 func handleChargePayment(ctx context.Context, input map[string]any) (map[string]any, error) {
 	orderID := input["order_id"]
 	amount := input["amount"]
-	log.Printf("[PAYMENT] Charging %.2f for order %v", amount, orderID)
+	logger.Info("charging payment",
+		zap.Any("order_id", orderID),
+		zap.Any("amount", amount),
+	)
 
 	// Simulate a failure when amount > 1000 so we can test compensation
 	if amt, ok := amount.(float64); ok && amt > 1000 {
@@ -56,12 +61,12 @@ func handleChargePayment(ctx context.Context, input map[string]any) (map[string]
 
 func handleRefundPayment(ctx context.Context, input map[string]any) (map[string]any, error) {
 	orderID := input["order_id"]
-	log.Printf("[PAYMENT] Refunding payment for order %v", orderID)
+	logger.Info("refunding payment", zap.Any("order_id", orderID))
 	return map[string]any{"refunded": true}, nil
 }
 
 func handleSendNotification(ctx context.Context, input map[string]any) (map[string]any, error) {
 	orderID := input["order_id"]
-	log.Printf("[NOTIFICATION] Sending confirmation for order %v", orderID)
+	logger.Info("sending notification", zap.Any("order_id", orderID))
 	return map[string]any{"notified": true}, nil
 }

@@ -21,13 +21,14 @@ type Config struct {
 
 func Load() *Config {
 	viper.SetConfigFile(".env")
-	viper.AutomaticEnv()
+	viper.AutomaticEnv() // reads from real environment variables too
 
 	if err := viper.ReadInConfig(); err != nil {
-		log.Fatal("Could not load .env file: ", err)
+		// .env file is optional — in Docker we get config from env vars
+		log.Println("No .env file found, using environment variables")
 	}
 
-	return &Config{
+	cfg := &Config{
 		AppPort:    viper.GetString("APP_PORT"),
 		AppEnv:     viper.GetString("APP_ENV"),
 		DBHost:     viper.GetString("DB_HOST"),
@@ -37,4 +38,17 @@ func Load() *Config {
 		DBName:     viper.GetString("DB_NAME"),
 		RedisAddr:  viper.GetString("REDIS_ADDR"),
 	}
+
+	// Fail fast if critical config is missing
+	if cfg.AppPort == "" {
+		log.Fatal("APP_PORT is required")
+	}
+	if cfg.DBHost == "" {
+		log.Fatal("DB_HOST is required")
+	}
+	if cfg.RedisAddr == "" {
+		log.Fatal("REDIS_ADDR is required")
+	}
+
+	return cfg
 }

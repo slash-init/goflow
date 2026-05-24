@@ -340,3 +340,62 @@ docker compose down -v          # Stop + wipe volumes
 - Full containerised deployment
 - Auth (JWT)
 - Parallel workflow steps
+
+---
+
+## Building & Deployment
+
+### Local development (Go runs on host machine)
+
+```bash
+# Start infrastructure only
+make docker/up
+
+# Run migrations
+make migrate
+
+# Run the server
+make run
+```
+
+### Full containerised deployment (everything in Docker)
+
+```bash
+# Build the static binary first
+make build
+
+# Build Docker image + start all services
+docker compose up -d --build
+
+# Run migrations
+make migrate
+
+# Check all containers
+docker compose ps
+```
+
+### Make commands
+
+```bash
+make help          # list all commands
+make run           # run server locally
+make build         # compile static binary to bin/goflow
+make migrate       # run all SQL migrations
+make migrate/reset # wipe and re-run migrations
+make db/connect    # open psql session
+make docker/up     # start all Docker services
+make docker/down   # stop all Docker services
+make docker/build  # build Docker image
+make docker/logs   # tail all container logs
+make lint          # run golangci-lint
+make test          # run all tests
+make tidy          # tidy go modules
+```
+
+### Docker image
+
+The image is built in two steps:
+1. `make build` — compiles a static Linux binary (`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`)
+2. `docker build` — copies the binary into a minimal Alpine image (~15MB)
+
+The app reads config from environment variables when running in Docker — no `.env` file needed.

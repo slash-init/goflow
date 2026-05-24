@@ -313,3 +313,49 @@ Grafana (:3000)
 - Auth (JWT)
 - Makefile + Dockerfile for the Go app
 - Full containerised deployment
+
+---
+
+## Build & Deployment
+
+### Binary compilation
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bin/goflow ./cmd/server/main.go
+```
+
+`CGO_ENABLED=0` produces a fully static binary with no C dependencies — required for Alpine-based containers which have no glibc. `-ldflags="-s -w"` strips debug symbols to reduce binary size.
+
+### Dockerfile (single-stage, copy pre-built binary)
+
+```
+alpine:3.19 base
+  └── COPY bin/goflow
+  └── non-root user (goflow:goflow)
+  └── EXPOSE 8080
+  └── ENTRYPOINT ["./goflow"]
+```
+
+Final image size: ~15MB. No Go toolchain included.
+
+### Config resolution order
+
+```
+1. .env file (local dev)
+2. Environment variables (Docker / production)
+3. Fatal if APP_PORT, DB_HOST, or REDIS_ADDR are missing
+```
+
+In Docker Compose, all config is passed via the `environment:` block. Container-to-container networking uses service names (`DB_HOST: postgres`, `REDIS_ADDR: redis:6379`) not localhost.
+
+### Container startup order
+
+```
+postgres (healthcheck: pg_isready)
+redis    (healthcheck: redis-cli ping)
+  └── app (depends_on: postgres healthy + redis healthy)
+prometheus
+grafana  (depends_on: prometheus)
+```
+
+`depends_on` with `condition: service_healthy` ensures the app never starts before the DB and Redis are actually ready — not just running.

@@ -4,4 +4,4 @@ global:
 scrape_configs:
   - job_name: goflow
     static_configs:
-      - targets: ["172.18.0.1:8080"]
+      - targets: ["app:8080"]

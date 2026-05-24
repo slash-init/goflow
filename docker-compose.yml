@@ -10,16 +10,48 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U goflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
     container_name: goflow_redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: goflow_app
+    ports:
+      - "8080:8080"
+    environment:
+      APP_PORT: 8080
+      APP_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: goflow
+      DB_PASSWORD: goflow_secret
+      DB_NAME: goflow_db
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
   prometheus:
     image: prom/prometheus:latest
     container_name: goflow_prometheus
+    user: root
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:z
     ports:

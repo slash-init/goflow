@@ -1,4 +1,3 @@
-cat > CONTRIBUTING.md << 'EOF'
 # Contributing
 
 ## Setup

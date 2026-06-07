@@ -12,6 +12,8 @@ It gives you:
 
 The default setup runs the API server, workflow engine, and worker in one Go process, while PostgreSQL and Redis run as external services.
 
+![GoFlow architecture diagram](docs/architecture.svg)
+
 ---
 
 ## Requirements

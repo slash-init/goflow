@@ -8,50 +8,7 @@ GoFlow is a distributed task queue and workflow engine. It separates task submis
 
 ## Component Map
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                           GoFlow Process                             │
-│                                                                      │
-│  ┌────────────────┐   ┌──────────────────┐   ┌──────────────────┐  │
-│  │   Fiber HTTP   │   │   Asynq Worker   │   │ Workflow Engine  │  │
-│  │  + Middleware  │   │   (goroutine)    │   │  (goroutine per  │  │
-│  │                │   │                  │   │   workflow)      │  │
-│  │  /health       │   │  email:send      │   │                  │  │
-│  │  /metrics      │   │  report:generate │   │  execute()       │  │
-│  │  /swagger/*    │   │  task:fail       │   │  failWorkflow()  │  │
-│  │  /api/v1/tasks │   └────────┬─────────┘   └────────┬─────────┘  │
-│  │  /api/v1/      │            │                       │             │
-│  │    workflows   │            └──────────┬────────────┘             │
-│  └───────┬────────┘                       │                          │
-│          │                                │                          │
-│  ┌───────▼────────────────────────────────▼──────┐                  │
-│  │                   Service Layer                │                  │
-│  │        TaskService         WorkflowService     │                  │
-│  └───────┬─────────────────────────┬─────────────┘                  │
-│          │                         │                                 │
-│  ┌───────▼────────┐  ┌─────────────▼──────┐                        │
-│  │   Task Repo    │  │   Workflow Repo     │                        │
-│  └───────┬────────┘  └─────────────┬──────┘                        │
-│          │            ┌─────────────▼──────┐                        │
-│          │            │   Queue Client      │                        │
-│          │            │  asynq.Client       │                        │
-│          │            │  asynq.Inspector    │                        │
-│          │            └─────────────┬───────┘                       │
-│                                     │                               │
-│  ┌──────────────────────────────────────────┐                      │
-│  │              Observability               │                      │
-│  │  pkg/logger  — Zap structured logging   │                      │
-│  │  pkg/metrics — Prometheus counters,     │                      │
-│  │                gauges, histograms        │                      │
-│  └──────────────────────────────────────────┘                      │
-└──────────────────────┬───────────────────────────────────────────── ┘
-                       │
-        ┌──────────────┼──────────────────┐
-  ┌─────▼──────┐ ┌─────▼──────┐ ┌────────▼──────┐
-  │ PostgreSQL │ │   Redis    │ │  Prometheus   │
-  │            │ │  (Asynq)  │ │  + Grafana    │
-  └────────────┘ └────────────┘ └───────────────┘
-```
+![GoFlow architecture diagram](docs/architecture.svg)
 
 ---
 

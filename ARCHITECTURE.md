@@ -167,8 +167,8 @@ task fails max_retries times
   → Asynq moves to Redis sorted set: asynq:{queue}:archived
 
 GET  /api/v1/tasks/dead        → Inspector.ListArchivedTasks(queue, PageSize(100))
-POST /api/v1/tasks/dead/:id/retry → Inspector.RunArchivedTask(queue, id)
-DELETE /api/v1/tasks/dead/:id  → Inspector.DeleteArchivedTask(queue, id)
+POST /api/v1/tasks/dead/:id/retry → Inspector.RunTask(queue, id)
+DELETE /api/v1/tasks/dead/:id  → Inspector.DeleteTask(queue, id)
 ```
 
 ### Graceful Shutdown

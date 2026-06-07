@@ -1,13 +1,23 @@
 # GoFlow
 
-A distributed task queue and workflow engine built in Go. Production-grade patterns throughout — clean architecture, structured logging, Prometheus metrics, Saga compensation, graceful shutdown, and full Docker deployment.
+GoFlow is a distributed task queue and workflow engine written in Go.
+
+It gives you:
+
+- an HTTP API for creating tasks and workflows
+- a Redis-backed async worker for background processing
+- PostgreSQL persistence for task and workflow state
+- Saga-style compensation for multi-step workflows
+- Prometheus metrics, structured logs, and Swagger docs
+
+The default setup runs the API server, workflow engine, and worker in one Go process, while PostgreSQL and Redis run as external services.
 
 ---
 
 ## Requirements
 
 - Go 1.21+
-- Docker & Docker Compose
+- Docker and Docker Compose
 
 ---
 
@@ -16,37 +26,43 @@ A distributed task queue and workflow engine built in Go. Production-grade patte
 ```bash
 git clone https://github.com/yourusername/goflow.git
 cd goflow
-
-# Start everything
 docker compose up -d --build
-
-# Run migrations
 make migrate
-
-# Done — all services running
 ```
+
+Then verify the app is up:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Useful URLs:
 
 | Service | URL |
 |---|---|
 | GoFlow API | http://localhost:8080 |
 | Swagger UI | http://localhost:8080/swagger/index.html |
 | Prometheus | http://localhost:9090 |
-| Grafana | http://localhost:3000 (admin/admin) |
+| Grafana | http://localhost:3000 |
+
+Grafana login: `admin` / `admin`
 
 ---
 
 ## Local Development
 
 ```bash
-# Start infrastructure only (postgres, redis, prometheus, grafana)
+# Start infrastructure only: PostgreSQL, Redis, Prometheus, Grafana
 make docker/up
 
 # Run migrations
 make migrate
 
-# Run server locally with hot reload
+# Start the Go service locally
 make run
 ```
+
+The `make run` target uses `go run ./cmd/server/main.go`, so the app reads config from your environment or a local `.env` file.
 
 ---
 
@@ -67,7 +83,208 @@ DB_NAME=goflow_db
 REDIS_ADDR=localhost:6379
 ```
 
-In Docker, config is passed via environment variables in `docker-compose.yml` — no `.env` file needed.
+Notes:
+
+- `APP_PORT`, `DB_HOST`, and `REDIS_ADDR` are required for startup.
+- The database connection also needs `DB_PORT`, `DB_USER`, `DB_PASSWORD`, and `DB_NAME`.
+- In Docker, these values are injected by `docker-compose.yml`, so a `.env` file is optional.
+
+---
+
+## What It Does
+
+### Tasks
+
+Tasks are created over HTTP, persisted in PostgreSQL, and queued in Redis for async processing.
+
+Endpoints:
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/v1/tasks` | Enqueue a task |
+| `GET` | `/api/v1/tasks` | List all tasks |
+| `GET` | `/api/v1/tasks/:id` | Get a task by ID |
+| `GET` | `/api/v1/tasks/dead?queue=default` | List dead tasks |
+| `POST` | `/api/v1/tasks/dead/:id/retry` | Retry a dead task |
+| `DELETE` | `/api/v1/tasks/dead/:id` | Delete a dead task |
+
+Example:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "type": "email:send",
+    "payload": {
+      "to": "user@example.com",
+      "subject": "Hello"
+    },
+    "priority": 1,
+    "max_retries": 3,
+    "queue": "default",
+    "delay_seconds": 0
+  }'
+```
+
+Built-in task types:
+
+- `email:send`
+- `report:generate`
+- `task:fail`
+
+Queues:
+
+- `critical` with weight `6`
+- `default` with weight `3`
+- `low` with weight `1`
+
+### Workflows
+
+Workflows are stateful multi-step processes. GoFlow includes a demo workflow called `order:process`.
+
+Endpoints:
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/v1/workflows` | Start a workflow |
+| `GET` | `/api/v1/workflows` | List all workflows |
+| `GET` | `/api/v1/workflows/:id` | Get workflow + step details |
+
+Example:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/workflows \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "order:process",
+    "input": {
+      "order_id": "order_001",
+      "amount": 99.99
+    }
+  }'
+```
+
+To test compensation, set `amount` greater than `1000` and the payment step will fail.
+
+Workflow statuses:
+
+- `pending`
+- `running`
+- `completed`
+- `failed`
+- `compensating`
+- `compensated`
+
+Step statuses:
+
+- `pending`
+- `running`
+- `completed`
+- `failed`
+- `compensating`
+- `compensated`
+- `skipped`
+
+Built-in workflow: `order:process`
+
+```text
+Step 1: inventory:reserve  -> on failure: inventory:release
+Step 2: payment:charge     -> on failure: payment:refund
+Step 3: notification:send  -> no compensation
+```
+
+If step 2 fails, compensation runs in reverse order: `payment:refund` -> `inventory:release`.
+
+---
+
+## Observability
+
+GoFlow exposes:
+
+- `GET /metrics` for Prometheus
+- structured JSON logs through Zap
+- Swagger docs at `/swagger/index.html`
+
+Key metrics include task throughput, task duration, workflow status counts, workflow duration, and HTTP request latency.
+
+Prometheus scrapes the app every 5 seconds in the default Docker setup.
+
+Grafana is available at http://localhost:3000.
+
+Suggested queries:
+
+```promql
+# Workflow outcomes
+goflow_workflows_completed_total
+
+# HTTP p95 latency
+histogram_quantile(0.95, rate(goflow_http_request_duration_seconds_bucket[1m]))
+
+# Task failure rate
+rate(goflow_tasks_processed_total{status="failure"}[5m])
+```
+
+---
+
+## Docker
+
+The image uses a multi-stage build:
+
+1. Builder: `golang:1.25-alpine`
+2. Runtime: `alpine:3.19`
+
+```bash
+docker build -t goflow:latest .
+docker compose up -d --build
+docker compose down
+docker compose down -v
+```
+
+Container startup order:
+
+1. PostgreSQL
+2. Redis
+3. App
+4. Prometheus
+5. Grafana
+
+---
+
+## Project Structure
+
+```text
+goflow/
+├── cmd/server/main.go          # Entry point
+├── docs/                       # Swagger-generated docs
+├── internal/
+│   ├── api/                    # HTTP handlers + middleware
+│   ├── service/                # Business logic
+│   ├── repository/             # SQL access layer
+│   ├── worker/                 # Asynq worker handlers
+│   └── workflow/               # Workflow engine and step handlers
+├── pkg/
+│   ├── config/                 # Configuration loading
+│   ├── database/               # PostgreSQL setup
+│   ├── queue/                  # Redis/Asynq client
+│   ├── logger/                 # Zap logger setup
+│   └── metrics/                # Prometheus metrics
+├── migrations/                 # SQL migrations
+├── observability/              # Prometheus config
+├── Dockerfile
+├── docker-compose.yml
+├── Makefile
+└── go.mod
+```
+
+---
+
+## Troubleshooting
+
+- If the app exits immediately, check that `APP_PORT`, `DB_HOST`, and `REDIS_ADDR` are set.
+- If migrations fail, make sure PostgreSQL is running first.
+- If tasks are not being processed, confirm Redis is reachable and the worker is running.
+- If Swagger is blank or stale, regenerate the docs before rebuilding the app.
+- If a workflow fails unexpectedly, inspect `/api/v1/workflows/:id` for the workflow and step states.
 
 ---
 
@@ -76,7 +293,7 @@ In Docker, config is passed via environment variables in `docker-compose.yml` �
 ```bash
 make help           # list all commands
 make run            # run server locally
-make build          # compile static binary → bin/goflow
+make build          # compile static binary -> bin/goflow
 make migrate        # run all SQL migrations
 make migrate/reset  # wipe and re-run migrations
 make db/connect     # open psql session
@@ -90,213 +307,3 @@ make vet            # run go vet
 make tidy           # tidy go modules
 make setup          # install dev tools
 ```
-
----
-
-## API Reference
-
-Full interactive docs at `http://localhost:8080/swagger/index.html`.
-
-### Health
-
-```
-GET /health
-```
-```json
-{ "status": "ok", "service": "goflow" }
-```
-
-### Metrics
-
-```
-GET /metrics
-```
-Prometheus-format metrics. Scraped by Prometheus every 5 seconds.
-
----
-
-### Tasks
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/v1/tasks` | Enqueue a task |
-| `GET` | `/api/v1/tasks` | List all tasks |
-| `GET` | `/api/v1/tasks/:id` | Get task by ID |
-| `GET` | `/api/v1/tasks/dead?queue=default` | List dead tasks |
-| `POST` | `/api/v1/tasks/dead/:id/retry` | Retry a dead task |
-| `DELETE` | `/api/v1/tasks/dead/:id` | Delete a dead task |
-
-**Create task body:**
-```json
-{
-  "type": "email:send",
-  "payload": { "to": "user@example.com", "subject": "Hello" },
-  "priority": 1,
-  "max_retries": 3,
-  "queue": "default",
-  "delay_seconds": 0
-}
-```
-
-Queues: `critical` (weight 6), `default` (weight 3), `low` (weight 1).
-
----
-
-### Workflows
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/v1/workflows` | Start a workflow |
-| `GET` | `/api/v1/workflows` | List all workflows |
-| `GET` | `/api/v1/workflows/:id` | Get workflow + step details |
-
-**Start workflow body:**
-```json
-{
-  "name": "order:process",
-  "input": {
-    "order_id": "order_001",
-    "amount": 99.99
-  }
-}
-```
-
-Set `amount > 1000` to trigger payment failure and test compensation.
-
-Workflow statuses: `pending` `running` `completed` `failed` `compensating` `compensated`
-Step statuses: `pending` `running` `completed` `failed` `compensating` `compensated` `skipped`
-
----
-
-## Built-in Task Types
-
-| Type | Description |
-|---|---|
-| `email:send` | Sends an email |
-| `report:generate` | Generates a report |
-| `task:fail` | Always fails (dead-letter testing) |
-
----
-
-## Built-in Workflow: `order:process`
-
-```
-Step 1: inventory:reserve  → on failure: inventory:release
-Step 2: payment:charge     → on failure: payment:refund
-Step 3: notification:send  → no compensation
-```
-
-If step 2 fails, compensation runs in reverse: `payment:refund` → `inventory:release`.
-
----
-
-## Observability
-
-### Prometheus Metrics
-
-| Metric | Type | Labels |
-|---|---|---|
-| `goflow_tasks_enqueued_total` | Counter | `type`, `queue` |
-| `goflow_tasks_processed_total` | Counter | `type`, `status` |
-| `goflow_task_duration_seconds` | Histogram | `type` |
-| `goflow_dead_tasks_total` | Gauge | `queue` |
-| `goflow_workflows_started_total` | Counter | `name` |
-| `goflow_workflows_completed_total` | Counter | `name`, `status` |
-| `goflow_workflow_duration_seconds` | Histogram | `name` |
-| `goflow_http_request_duration_seconds` | Histogram | `method`, `route`, `status_code` |
-
-### Grafana Dashboard
-
-1. Open http://localhost:3000 → login `admin/admin`
-2. Add data source → Prometheus → URL: `http://prometheus:9090`
-3. Create panels with these queries:
-
-```promql
-# Workflow outcomes
-goflow_workflows_completed_total
-
-# HTTP p95 latency
-histogram_quantile(0.95, rate(goflow_http_request_duration_seconds_bucket[1m]))
-
-# Task failure rate
-rate(goflow_tasks_processed_total{status="failure"}[5m])
-```
-
-### Structured Logging
-
-All logs are structured JSON via Zap:
-
-```json
-{"level":"INFO","ts":"...","msg":"workflow completed","workflow_id":"...","name":"order:process","duration":"18ms"}
-{"level":"ERROR","ts":"...","msg":"step failed","workflow_id":"...","step":"Charge Payment","error":"payment declined"}
-```
-
-`APP_ENV=development` → colored console output.
-`APP_ENV=production` → JSON only.
-
----
-
-## Project Structure
-
-```
-goflow/
-├── cmd/server/main.go          # Entry point
-├── docs/                       # Swagger generated docs
-├── internal/
-│   ├── api/                    # HTTP handlers + middleware
-│   │   ├── health.go
-│   │   ├── task.go
-│   │   ├── workflow.go
-│   │   └── middleware.go
-│   ├── service/
-│   │   ├── task.go
-│   │   ├── task_test.go
-│   │   └── workflow.go
-│   ├── repository/
-│   │   ├── task.go
-│   │   └── workflow.go
-│   ├── worker/
-│   │   ├── server.go
-│   │   └── handlers.go
-│   └── workflow/
-│       ├── engine.go
-│       ├── engine_test.go
-│       └── handlers.go
-├── pkg/
-│   ├── config/config.go
-│   ├── database/postgres.go
-│   ├── queue/client.go
-│   ├── logger/logger.go
-│   └── metrics/metrics.go
-├── migrations/
-│   ├── 001_create_tasks.sql
-│   └── 002_create_workflows.sql
-├── observability/
-│   └── prometheus.yml
-├── Dockerfile
-├── docker-compose.yml
-├── Makefile
-├── .golangci.yml
-├── .dockerignore
-├── .gitignore
-├── .env
-└── go.mod
-```
-
----
-
-## Docker
-
-The app is built with a multi-stage Dockerfile:
-
-1. **Builder stage** (`golang:1.25-alpine`) — downloads dependencies, compiles a static binary
-2. **Final stage** (`alpine:3.19`) — copies binary only, ~15MB image
-
-```bash
-docker build -t goflow:latest .   # build image
-docker compose up -d --build      # build + start everything
-docker compose down               # stop
-docker compose down -v            # stop + wipe volumes
-```
-
-Container startup order: `postgres` (healthcheck) → `redis` (healthcheck) → `app` → `prometheus` → `grafana`.

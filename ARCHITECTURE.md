@@ -122,7 +122,7 @@ sequenceDiagram
   Main->>DB: database.NewPostgresDB(cfg) / sqlx.Connect
   Main->>Redis: queue.NewClient(REDIS_ADDR)
   Main->>Wire: construct repositories, services, handlers, engine
-  Main->>Worker: NewWorkerServer; go RegisterHandlers(server)
+  Main->>Worker: NewWorkerServer then go RegisterHandlers(server)
   Main->>HTTP: create Fiber, middleware, routes, /metrics
   Main->>HTTP: goroutine app.Listen(:APP_PORT)
   Main->>Main: wait for interrupt or SIGTERM
@@ -156,9 +156,9 @@ sequenceDiagram
   U->>H: POST /api/v1/tasks JSON
   H->>H: BodyParser(CreateTaskInput)
   H->>S: CreateTask(input)
-  S->>S: require type; defaults; marshal payload; calculate run_at
+  S->>S: require type, apply defaults, marshal payload, calculate run_at
   S->>R: Create(task)
-  R->>PG: INSERT tasks; RETURNING id/status/retries/timestamps
+  R->>PG: INSERT tasks and return id/status/retries/timestamps
   PG-->>R: task record
   R-->>S: populated record
   S->>Q: EnqueueTask(background, type, payload, Queue/MaxRetry/ProcessIn)
@@ -269,7 +269,7 @@ sequenceDiagram
   participant SH as StepHandler registry
   C->>H: POST /api/v1/workflows {name,input}
   H->>S: StartOrderWorkflow
-  S->>S: require order_id and amount; build 3 fixed steps
+  S->>S: require order_id and amount, build 3 fixed steps
   S->>E: StartWorkflow(ctx,name,steps,input)
   E->>DB: transaction: INSERT workflow and all steps
   DB-->>E: committed records and IDs
@@ -278,7 +278,7 @@ sequenceDiagram
   H-->>C: 201 Created
   G->>DB: load workflow and ordered steps
   loop each step sequentially
-    G->>DB: step=running; workflow running/current_step=i
+    G->>DB: step running and workflow running with current_step i
     G->>SH: handler(ctx, persisted step input)
     SH-->>G: output or error
     alt handler success
@@ -317,7 +317,7 @@ flowchart TD
   D --> E[Run inventory:release with original step input]
   E --> F{Compensation succeeds?}
   F -->|yes| G[Step status compensated]
-  F -->|no| H[Log error; leave step compensating]
+  F -->|no| H[Log error and leave step compensating]
   G --> I[Continue reverse walk]
   H --> I
   I --> J[Workflow status set compensated]
@@ -363,7 +363,7 @@ Asynq has a separate task lifecycle in Redis (queued/active/retrying/archived an
 ```mermaid
 stateDiagram-v2
   [*] --> running: inserted with running status
-  running --> running: before each step; current_step = index
+  running --> running: before each step, current_step is the index
   running --> completed: all steps return success
   running --> compensating: handler/decode/missing handler failure
   compensating --> compensated: compensation pass ends, even if actions fail
